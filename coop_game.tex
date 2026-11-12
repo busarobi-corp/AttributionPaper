@@ -1,0 +1,454 @@
+\section{Cooperative Game Formulation of the Attribution Problem}
+\label{sec:coop_game}
+
+We model the distribution of the context share $w$ as a cooperative game $([n], v)$ with a value function $v: 2^{[n]} \to \mathbb{R}$, $v(\emptyset) = 0$, where $v(S')$ quantifies how well the sub-collection $S'$ explains the response $r$. Larger values of $v$ mean that the response is better explained. The marginal contribution of snippet $i$ to a coalition $S' \subseteq [n] \setminus \{i\}$ is $\Delta v(S', i) := v(S' \cup \{i\}) - v(S')$, and the Shapley value~\cite{shapley1953value} of snippet $i$ is
+\begin{align}\label{eq:shapley_def}
+    \phi_i(v) := \sum_{S' \subseteq [n] \setminus \{i\}} \frac{|S'|!\,(n - |S'| - 1)!}{n!} \, \Delta v(S', i).
+\end{align}
+Equivalently, $\phi_i(v)$ is the expected marginal contribution of snippet $i$ when the snippets arrive in a uniformly random order. We write $\boldsymbol{\phi}(v) := (\phi_1(v), \dots, \phi_n(v))^\top$.
+
+\paragraph{Why Shapley values?}
+The Shapley value is the unique allocation rule satisfying the following four axioms~\cite{shapley1953value}. Each of them is a natural requirement on source attribution.
+\begin{itemize}
+    \item \textbf{Efficiency:} $\sum_{i=1}^n \phi_i(v) = v([n])$. The utility of the full context is distributed among the snippets, without loss and without double counting.
+    \item \textbf{Symmetry:} if $v(S' \cup \{i\}) = v(S' \cup \{j\})$ for all $S' \subseteq [n] \setminus \{i,j\}$, then $\phi_i(v) = \phi_j(v)$. Interchangeable snippets, e.g., duplicates, receive equal credit.
+    \item \textbf{Null player:} if $\Delta v(S', i) = 0$ for all $S' \subseteq [n] \setminus \{i\}$, then $\phi_i(v) = 0$. Irrelevant snippets receive no credit.
+    \item \textbf{Linearity:} $\boldsymbol{\phi}(a u + b v) = a\, \boldsymbol{\phi}(u) + b\, \boldsymbol{\phi}(v)$ for all games $u, v$ and $a, b \in \mathbb{R}$. Attributions computed on components of the value function, e.g., response segments or attention heads, add up to the attribution of the aggregated value function, and rescaling $v$ rescales $\boldsymbol{\phi}$.
+\end{itemize}
+Two further properties follow from these axioms. The first is an \emph{ordering} property: a snippet that is at least as useful as another one in every context receives at least as much credit.
+
+\begin{lemma}[Desirability]\label{lem:desirability}
+For all $i \neq j$,
+\begin{align}
+    \phi_i(v) - \phi_j(v) = \sum_{S' \subseteq [n] \setminus \{i,j\}} \frac{|S'|!\,(n - |S'| - 2)!}{(n-1)!} \big( v(S' \cup \{i\}) - v(S' \cup \{j\}) \big).
+\end{align}
+In particular, if $v(S' \cup \{i\}) \ge v(S' \cup \{j\})$ for all $S' \subseteq [n] \setminus \{i,j\}$, then $\phi_i(v) \ge \phi_j(v)$.
+\end{lemma}
+
+\begin{proof}
+Let $\gamma(s) := s!(n-s-1)!/n!$. In~\eqref{eq:shapley_def} for $\phi_i$, write each coalition as $S'$ or $S' \cup \{j\}$ with $S' \subseteq [n] \setminus \{i,j\}$, and do the same for $\phi_j$. In the difference, the terms $v(S')$ and $v(S' \cup \{i,j\})$ cancel, leaving $\big(\gamma(|S'|) + \gamma(|S'|+1)\big)\big(v(S' \cup \{i\}) - v(S' \cup \{j\})\big)$. Finally, $\gamma(s) + \gamma(s+1) = \frac{s!(n-s-2)!}{n!}\big((n-s-1) + (s+1)\big) = \frac{s!(n-s-2)!}{(n-1)!}$.
+\end{proof}
+
+The second is \emph{strong monotonicity}~\cite{young1985monotonic}: if $\Delta u(S', i) \ge \Delta v(S', i)$ for all $S'$, then $\phi_i(u) \ge \phi_i(v)$, i.e., a snippet's credit depends only on its own marginal contributions. By~\eqref{eq:shapley_def}, this holds trivially. Young~\cite{young1985monotonic} showed that efficiency, symmetry and strong monotonicity characterize the Shapley value as well.
+
+Beyond the axioms, averaging over all arrival orders accounts for \emph{interactions} between snippets. Redundant snippets (substitutes) split the credit. Leave-one-out scores, by contrast, assign zero credit to both copies of a duplicated snippet. Snippets that are only jointly informative (complements, e.g., distributed evidence) are both credited, whereas single-snippet scores miss their synergy. The Shapley value only requires oracle access to $v$, so the same machinery applies to the likelihood-based value function of Section~\ref{sec:llh_shapley} and to the geometric value functions of Section~\ref{subsec:geometric_values}. The axioms are, however, only meaningful if $v$ is a genuine set function, i.e., if $v(S')$ does not depend on the order in which the snippets of $S'$ are presented. Likelihood-based value functions violate this requirement; embedding-based value functions satisfy it by construction.
+
+\subsection{Link Functions}
+\label{subsec:link_functions}
+
+The Shapley vector $\boldsymbol{\phi}(v)$ is measured in the units of $v$, and its entries may be negative, e.g., when a snippet contradicts the response. To obtain contributions that satisfy the credit conservation~\eqref{eq:model_contribution}, we map it to a vector whose entries sum to one. Let $\mathbf{1}$ be the all-ones vector, $x^+ := \max(0, x)$ (entrywise for vectors),
+\begin{align*}
+    \mathcal{A}^{n-1} := \{\mathbf{a} \in \mathbb{R}^n : \mathbf{1}^\top \mathbf{a} = 1\} \qquad \text{and} \qquad \Delta^{n-1} := \mathcal{A}^{n-1} \cap \mathbb{R}^n_{\ge 0}
+\end{align*}
+the affine hull of the probability simplex and the simplex itself.
+
+\begin{definition}[Link function]\label{def:link}
+A \textbf{link function} is a map $g: \mathcal{D}_g \to \mathcal{A}^{n-1}$ on a domain $\mathcal{D}_g \subseteq \mathbb{R}^n$. It is \emph{simplex-valued} if $g(\mathcal{D}_g) \subseteq \Delta^{n-1}$. Given a global context weight $w \in [0,1]$, the contributions are
+\begin{align}\label{eq:link}
+    \boldsymbol{\alpha} := w \cdot g\big(\boldsymbol{\phi}(v)\big), \qquad \alpha_{\text{model}} := 1 - w,
+\end{align}
+which satisfy~\eqref{eq:model_contribution} by construction. If $\boldsymbol{\phi}(v) \notin \mathcal{D}_g$, i.e., no snippet carries positive credit, we set $\boldsymbol{\alpha} := \mathbf{0}$ and $\alpha_{\text{model}} := 1$.
+\end{definition}
+
+We consider the following candidates.
+\begin{itemize}
+    \item \textbf{Linear:} $g^{\text{lin}}(\boldsymbol{\phi}) := \boldsymbol{\phi} / \mathbf{1}^\top \boldsymbol{\phi}$ on $\{\mathbf{1}^\top \boldsymbol{\phi} > 0\}$. By Efficiency, this is the efficient normalization $\phi_i(v) / v([n])$. Its entries sum to one but may be negative.
+    \item \textbf{Rectified}~\cite{nematov2025source}: $g^{\text{rect}}(\boldsymbol{\phi}) := \boldsymbol{\phi}^+ / \mathbf{1}^\top \boldsymbol{\phi}^+$ on $\{\mathbf{1}^\top \boldsymbol{\phi}^+ > 0\}$. It discards negative credit and preserves the \emph{ratios} between supporting snippets.
+    \item \textbf{Sparsemax}~\cite{martins2016softmax}: $g^{\text{sp}}(\boldsymbol{\phi}) := \operatorname{Proj}_{\Delta^{n-1}}\big(\boldsymbol{\phi} / \mathbf{1}^\top \boldsymbol{\phi}\big)$ on $\{\mathbf{1}^\top \boldsymbol{\phi} > 0\}$, the Euclidean projection of the efficient normalization onto the simplex. It has the closed form $g^{\text{sp}}_i = (x_i - \tau)^+$ with $\mathbf{x} := \boldsymbol{\phi}/\mathbf{1}^\top\boldsymbol{\phi}$ and $\tau \ge 0$ the solution of $\sum_i (x_i - \tau)^+ = 1$. It charges the negative credit uniformly to the supporting snippets and preserves their \emph{differences}.
+    \item \textbf{Power:} $g^{\gamma}_i(\boldsymbol{\phi}) := (\phi_i^+)^\gamma / \sum_j (\phi_j^+)^\gamma$ for $\gamma > 0$. It recovers $g^{\text{rect}}$ for $\gamma = 1$, sharpens for $\gamma > 1$, and flattens for $\gamma < 1$.
+    \item \textbf{Softmax:} $g^{\text{soft}}_i(\boldsymbol{\phi}) := e^{\phi_i/\tau} / \sum_j e^{\phi_j/\tau}$ with temperature $\tau > 0$, defined on all of $\mathbb{R}^n$.
+    \item \textbf{Absolute:} $g^{\text{abs}}(\boldsymbol{\phi}) := |\boldsymbol{\phi}| / \mathbf{1}^\top |\boldsymbol{\phi}|$. It measures \emph{influence} rather than \emph{support}.
+\end{itemize}
+\begin{definition}[Floor-shifted power link]\label{def:floor_link}
+For $\gamma > 0$ and $\phi_{\min} := \min_j \phi_j$, let $g^{\text{fl},\gamma}_i(\boldsymbol{\phi}) := (\phi_i - \phi_{\min})^\gamma / \sum_j (\phi_j - \phi_{\min})^\gamma$, with $g^{\text{fl},\gamma}(\boldsymbol{\phi}) := \mathbf{1}/n$ if all entries are equal. It removes a common offset before normalizing (Section~\ref{subsec:contrast_calibration}).
+\end{definition}
+
+\begin{example}[Seven links on the same Shapley vector]\label{ex:links}
+Let $n = 4$ and $\boldsymbol{\phi} = (3, 1, -1, 0)^\top$: snippet~1 strongly supports the response, snippet~2 weakly supports it, snippet~3 contradicts it, and snippet~4 is irrelevant (a null player). Table~\ref{tab:link_example} lists the resulting shares. The links agree on the ranking of the two supporting snippets but differ in three respects: whether the contradicting snippet receives credit (softmax, absolute), whether the irrelevant snippet receives credit (softmax, floor-shifted), and how the credit is split between the supporting snippets.
+\end{example}
+
+\begin{table}[h]
+\centering
+\small
+\begin{tabular}{lcccc}
+\hline
+\textbf{Link} & $s_1$ (strong) & $s_2$ (weak) & $s_3$ (contradicts) & $s_4$ (irrelevant) \\ \hline
+Linear                       & $1.000$ & $0.333$ & $-0.333$ & $0$ \\
+Rectified                    & $0.750$ & $0.250$ & $0$      & $0$ \\
+Sparsemax                    & $0.833$ & $0.167$ & $0$      & $0$ \\
+Power ($\gamma = 2$)         & $0.900$ & $0.100$ & $0$      & $0$ \\
+Softmax ($\tau = 1$)         & $0.831$ & $0.112$ & $0.015$  & $0.041$ \\
+Absolute                     & $0.600$ & $0.200$ & $0.200$  & $0$ \\
+Floor-shifted ($\gamma = 1$) & $0.571$ & $0.286$ & $0$      & $0.143$ \\ \hline
+\end{tabular}
+\caption{Shares assigned by each link to $\boldsymbol{\phi} = (3, 1, -1, 0)^\top$ (Example~\ref{ex:links}).}
+\label{tab:link_example}
+\end{table}
+
+\subsection{Which Shapley Properties Survive the Link?}
+\label{subsec:link_axioms}
+
+A link function defines a new allocation rule on games,
+\begin{align}
+    \psi_g(v) := g\big(\boldsymbol{\phi}(v)\big) \in \mathcal{A}^{n-1},
+\end{align}
+and the contributions are $\boldsymbol{\alpha} = w\, \psi_g(v)$. The global weight only rescales, so we study $\psi_g$. Since $\psi_g$ always sums to one, it cannot satisfy the Shapley axioms literally; instead, we ask whether it satisfies their \emph{normalized analogues}. We go through the axioms one at a time and state, for each, (a) the normalized analogue, (b) a condition on $g$ that guarantees it, and (c) which links satisfy it. Table~\ref{tab:link_axioms} summarizes the results.
+
+\paragraph{Efficiency $\to$ Faithfulness.}
+After normalization, every link sums to one, so efficiency in its literal form is automatic. The meaningful analogue is that shares are \emph{proportional} to the Shapley values, i.e., $\psi_{g,i}(v) = \phi_i(v) / v([n])$, the efficient normalization. We call $g$ \emph{faithful} if $g(\boldsymbol{\phi}) = \boldsymbol{\phi} / \mathbf{1}^\top \boldsymbol{\phi}$ for every $\boldsymbol{\phi} \in \mathbb{R}^n_{\ge 0} \setminus \{\mathbf{0}\}$, i.e., the link does not distort a Shapley vector that is already a valid credit vector.
+\begin{itemize}
+    \item The \textbf{linear} link equals the efficient normalization for every Shapley vector, at the price of possibly negative shares.
+    \item The \textbf{rectified}, \textbf{sparsemax} and \textbf{absolute} links are faithful: they coincide with the linear link on non-negative vectors and differ only in how they treat negative entries.
+    \item The \textbf{power} ($\gamma \neq 1$), \textbf{softmax} and \textbf{floor-shifted} links are not faithful. In Table~\ref{tab:link_example}, removing $s_3$ would make the Shapley vector $(3, 1, 0)$, which the faithful links map to $(0.75, 0.25, 0)$, while these links do not.
+\end{itemize}
+
+\paragraph{Symmetry $\to$ Permutation equivariance.}
+The analogue is: interchangeable snippets receive equal shares. It holds whenever $g$ is permutation equivariant, $g(\sigma \boldsymbol{\phi}) = \sigma g(\boldsymbol{\phi})$ for every permutation $\sigma$. \textbf{All} candidate links satisfy this.
+
+\paragraph{Null player $\to$ Zero in, zero out.}
+The analogue is: a null player receives zero share. It holds whenever $\phi_i = 0 \Rightarrow g_i(\boldsymbol{\phi}) = 0$.
+\begin{itemize}
+    \item Satisfied by the linear, rectified, sparsemax (since $\tau \ge 0$), power and absolute links.
+    \item Violated by the \textbf{softmax} link, which gives every snippet a positive share, and by the \textbf{floor-shifted} link, which gives a null player a positive share whenever some snippet has a negative Shapley value ($s_4$ in Table~\ref{tab:link_example}).
+\end{itemize}
+A stronger requirement is \emph{sign consistency}, $\phi_i \le 0 \Rightarrow g_i(\boldsymbol{\phi}) = 0$: contradicting snippets also receive no credit. It holds for the rectified, sparsemax and power links. It fails for the linear link (negative shares), for the softmax and absolute links (positive shares), and for the floor-shifted link.
+
+\paragraph{Linearity $\to$ Scale invariance and aggregation consistency.}
+Linearity has two parts with different fates.
+\begin{itemize}
+    \item \textbf{Homogeneity}, $\boldsymbol{\phi}(cv) = c\, \boldsymbol{\phi}(v)$, has the analogue $\psi_g(cv) = \psi_g(v)$ for $c > 0$: shares do not depend on the units of $v$ (nats vs.\ bits, or a rescaled embedding geometry). It holds whenever $g(c\boldsymbol{\phi}) = g(\boldsymbol{\phi})$. All links except \textbf{softmax} satisfy this; for softmax, the temperature $\tau$ is measured in the units of $v$.
+    \item \textbf{Additivity}, $\boldsymbol{\phi}(u + v) = \boldsymbol{\phi}(u) + \boldsymbol{\phi}(v)$, has the analogue of \emph{aggregation consistency}: for games with $u([n]), v([n]) > 0$,
+    \begin{align}\label{eq:aggregation}
+        \psi_g(u + v) = \frac{u([n])\, \psi_g(u) + v([n])\, \psi_g(v)}{u([n]) + v([n])},
+    \end{align}
+    i.e., shares computed on components combine into the shares of the aggregated game as a value-weighted average. The linear link satisfies~\eqref{eq:aggregation}, since $\mathbf{1}^\top \boldsymbol{\phi}(u) = u([n])$ by Efficiency. No simplex-valued link can do so in general.
+\end{itemize}
+
+\begin{proposition}[Additivity and non-negativity are incompatible]\label{prop:link_impossibility}
+Let $n \ge 2$. No simplex-valued link function is both faithful and aggregation consistent on all games with positive total value.
+\end{proposition}
+
+\begin{proof}
+Take $\boldsymbol{\phi} \in \mathbb{R}^n$ with $t := \mathbf{1}^\top \boldsymbol{\phi} > 0$ and $\phi_1 < 0$, e.g., $\boldsymbol{\phi} = (-1, 2, 0, \dots, 0)^\top$. The additive game $u(S') := \sum_{i \in S'} \phi_i$ has $\boldsymbol{\phi}(u) = \boldsymbol{\phi}$ and $u([n]) = t$. The game $c(S') := \lambda |S'|$ with $\lambda \ge |\phi_1|$ has $\boldsymbol{\phi}(c) = \lambda \mathbf{1}$ and $c([n]) = n\lambda$, and $u + c$ has the non-negative Shapley vector $\boldsymbol{\phi} + \lambda \mathbf{1}$. By faithfulness, $\psi_g(u + c) = (\boldsymbol{\phi} + \lambda \mathbf{1})/(t + n\lambda)$ and $\psi_g(c) = \mathbf{1}/n$. Substituting into~\eqref{eq:aggregation} gives $\boldsymbol{\phi} + \lambda\mathbf{1} = t\, \psi_g(u) + \lambda \mathbf{1}$, i.e., $\psi_g(u) = \boldsymbol{\phi}/t$, whose first entry is negative. This contradicts $\psi_g(u) \in \Delta^{n-1}$.
+\end{proof}
+
+Faithful simplex-valued links (rectified, sparsemax, absolute) satisfy~\eqref{eq:aggregation} only when all Shapley vectors involved are non-negative, where they coincide with the linear link. Non-faithful links (power, softmax, floor-shifted) violate it even then.
+
+\paragraph{Desirability $\to$ Order preservation.}
+The analogue of Lemma~\ref{lem:desirability} is: a snippet that is at least as useful as another one in every context receives at least as large a share. It holds whenever $g$ is order preserving, $\phi_i \ge \phi_j \Rightarrow g_i(\boldsymbol{\phi}) \ge g_j(\boldsymbol{\phi})$. All candidates are order preserving except the \textbf{absolute} link, which can rank a contradicting snippet above a supporting one: $(-3, 1, 1)^\top \mapsto (0.6, 0.2, 0.2)^\top$.
+
+\begin{proposition}[Transfer of axioms]\label{prop:axiom_transfer}
+Let $g$ be a link function. If $g$ is permutation equivariant, then $\psi_g$ satisfies the normalized Symmetry axiom. If $g$ maps zero entries to zero, then $\psi_g$ satisfies the Null player axiom. If $g$ is order preserving, then $\psi_g$ satisfies Desirability.
+\end{proposition}
+
+\begin{proof}
+If $i$ and $j$ are interchangeable, then $\phi_i(v) = \phi_j(v)$ by Symmetry, so the transposition $\sigma = (i\,j)$ fixes $\boldsymbol{\phi}(v)$, and equivariance gives $g(\boldsymbol{\phi}) = \sigma g(\boldsymbol{\phi})$, i.e., $g_i = g_j$. If $i$ is a null player, then $\phi_i(v) = 0$ by the Null player axiom. If $v(S' \cup \{i\}) \ge v(S' \cup \{j\})$ for all $S'$, then $\phi_i(v) \ge \phi_j(v)$ by Lemma~\ref{lem:desirability}.
+\end{proof}
+
+\paragraph{Strong monotonicity is lost by every link.}
+Shares are relative quantities, so a snippet's share can decrease although its own marginal contributions are unchanged, simply because another snippet became more useful.
+
+\begin{proposition}[Normalization destroys strong monotonicity]\label{prop:no_strong_monotonicity}
+Let $n \ge 2$, and let $g$ be permutation equivariant with $g_2(\boldsymbol{\phi}) > g_1(\boldsymbol{\phi})$ for $\boldsymbol{\phi} = (1, 3, 1, \dots, 1)^\top$. Then $\psi_g$ violates strong monotonicity. In particular, all candidate links violate it.
+\end{proposition}
+
+\begin{proof}
+Let $u(S') := |S'|$, and let $v(S') := |S'| + 2$ if $2 \in S'$ and $v(S') := |S'|$ otherwise. Both games are additive, with $\boldsymbol{\phi}(u) = \mathbf{1}$ and $\boldsymbol{\phi}(v) = (1, 3, 1, \dots, 1)^\top$, and snippet~1 has the same marginal contributions in both: $\Delta u(S', 1) = \Delta v(S', 1) = 1$. Strong monotonicity therefore requires $\psi_{g,1}(u) = \psi_{g,1}(v)$. By equivariance, $\psi_{g,1}(u) = 1/n$, and the entries $1, 3, \dots, n$ of $\psi_g(v)$ are equal. Since they sum to one with $\psi_{g,2}(v)$ and $\psi_{g,2}(v) > \psi_{g,1}(v)$, we get $\psi_{g,1}(v) < 1/n$. Every candidate favors the larger entry of $(1, 3, 1, \dots, 1)^\top$.
+\end{proof}
+
+Since efficiency, symmetry and strong monotonicity characterize the Shapley value~\cite{young1985monotonic}, no normalized attribution rule, including the algorithm of~\cite{nematov2025source}, is a Shapley value in the axiomatic sense. This is a consequence of normalization itself, not of a particular link.
+
+\begin{table}[h]
+\centering
+\small
+\begin{tabular}{lcccccccc}
+\hline
+ & & \textbf{Efficiency} & \textbf{Symmetry} & \textbf{Null} & \multicolumn{2}{c}{\textbf{Linearity}} & & \\
+\textbf{Link} & \textbf{Simplex} & \textbf{(faithful)} & & \textbf{player} & \textbf{scale} & \textbf{aggreg.} & \textbf{Order} & \textbf{Sign} \\ \hline
+Linear                             & $\times$   & \checkmark & \checkmark & \checkmark & \checkmark & \checkmark & \checkmark & $\times$   \\
+Rectified                          & \checkmark & $(\ast)$   & \checkmark & \checkmark & \checkmark & $(\ast)$   & \checkmark & \checkmark \\
+Sparsemax                          & \checkmark & $(\ast)$   & \checkmark & \checkmark & \checkmark & $(\ast)$   & \checkmark & \checkmark \\
+Absolute                           & \checkmark & $(\ast)$   & \checkmark & \checkmark & \checkmark & $(\ast)$   & $\times$   & $\times$   \\
+Power, $\gamma \neq 1$             & \checkmark & $\times$   & \checkmark & \checkmark & \checkmark & $\times$   & \checkmark & \checkmark \\
+Softmax                            & \checkmark & $\times$   & \checkmark & $\times$   & $\times$   & $\times$   & \checkmark & $\times$   \\
+Floor-shifted                      & \checkmark & $\times$   & \checkmark & $\times$   & \checkmark & $\times$   & \checkmark & $\times$   \\ \hline
+\end{tabular}
+\caption{Shapley properties preserved by each link function. $(\ast)$: holds whenever the Shapley vectors involved are non-negative, e.g., for monotone value functions (Theorem~\ref{thm:monotone_links}). Strong monotonicity is violated by every link (Proposition~\ref{prop:no_strong_monotonicity}).}
+\label{tab:link_axioms}
+\end{table}
+
+\paragraph{Monotone value functions remove the trade-off.}
+The entries marked $(\ast)$ in Table~\ref{tab:link_axioms} become unconditional when the Shapley values are non-negative, which is guaranteed by monotonicity of the value function.
+
+\begin{theorem}[Monotone value functions]\label{thm:monotone_links}
+Let $v$ be monotone, i.e., $\Delta v(S', i) \ge 0$ for all $S'$ and $i$, with $v([n]) > 0$. Then $\boldsymbol{\phi}(v) \in \mathbb{R}^n_{\ge 0}$, and every faithful link gives
+\begin{align}
+    \psi_{g,i}(v) = \frac{\phi_i(v)}{v([n])} \qquad (i \in [n]).
+\end{align}
+In particular, the linear, rectified, sparsemax and absolute links coincide, and $\psi_g$ is simplex-valued and satisfies Faithfulness, Symmetry, Null player, scale invariance, Desirability and Sign consistency. Moreover, it satisfies aggregation consistency on the class of monotone games.
+\end{theorem}
+
+\begin{proof}
+Each $\phi_i(v)$ is a convex combination of non-negative marginal gains, so $\boldsymbol{\phi}(v) \ge \mathbf{0}$, and $\mathbf{1}^\top \boldsymbol{\phi}(v) = v([n]) > 0$ by Efficiency. Faithfulness gives the formula, and the listed properties hold for the linear link on non-negative vectors. Sign consistency follows because $\phi_i \le 0$ implies $\phi_i = 0$. Sums of monotone games are monotone, so~\eqref{eq:aggregation} holds by the linear case.
+\end{proof}
+
+The log-volume value function $v_{\text{logvol}}$ of Section~\ref{subsec:geometric_values} is monotone. With $v_{\text{logvol}}$, the choice among faithful links is therefore immaterial, and all Shapley properties survive normalization except strong monotonicity, which no normalized rule can keep.
+
+\begin{remark}[The linear link and the likelihood-based global weight]\label{rem:linear_llh}
+For the log-likelihood value function, the global weight of~\cite{nematov2025source} is itself an efficient normalization. With $L_S := \log P(r \mid p, S)$ and $L_\emptyset := \log P(r \mid p) < 0$, we have $1 - L_S / L_\emptyset = v_{\text{LL}}([n]) / (-L_\emptyset)$. Hence, if $v_{\text{LL}}([n]) > 0$, the linear link yields
+\begin{align}
+    \alpha_i = w \, \frac{\phi_i(v_{\text{LL}})}{v_{\text{LL}}([n])} = \frac{\phi_i(v_{\text{LL}})}{-\log P(r \mid p)},
+\end{align}
+so each snippet receives its Shapley value measured in units of the baseline surprisal of the response, and $\boldsymbol{\alpha}$ is linear in $v_{\text{LL}}$. For geometric value functions, $w$ and $v([n])$ come from different models, and this identity does not hold.
+\end{remark}
+
+\subsection{Which link function should be used then?}
+\begin{enumerate}
+    \item{\bf Non-negativity:}  Prefer a monotone value function such as $v_{\text{logvol}}$. By Theorem~\ref{thm:monotone_links}, any faithful link then keeps all Shapley properties except strong monotonicity.
+    \item{\bf Negativity:} If Shapley values can be negative, use the \textbf{linear} link for diagnostics, since contradicting snippets remain visible as negative credit and it is the only aggregation-consistent link. For simplex-valued contributions, use the \textbf{rectified} link (ratio preserving, compatible with~\cite{nematov2025source}) or the \textbf{sparsemax} link (minimal Euclidean distortion of the efficient normalization). These are the only candidates that are faithful, null-player preserving, order preserving and sign consistent.
+    \item Avoid the \textbf{softmax} link (no null player, unit dependent) and the \textbf{absolute} link (breaks the ordering) for support attribution. Use the \textbf{power} and \textbf{floor-shifted} links only as explicit calibrations, and report results with the rectified link alongside.
+\end{enumerate}
+
+\subsection{Monte Carlo Estimation and Stability}
+\label{subsec:link_stability}
+
+When $\boldsymbol{\phi}(v)$ is estimated by the permutation estimator $\bar{\mathbf{m}}_K$ of Lemma~\ref{lemma:unbiased_estimator}, two further points matter.
+
+\paragraph{Link once, after averaging.}
+All candidate links except the linear one are non-linear, so they do not commute with expectation: in general, $\mathbb{E}_\pi[g(\mathbf{m}^\pi)] \neq g(\mathbb{E}_\pi[\mathbf{m}^\pi]) = g(\boldsymbol{\phi}(v))$. The link must therefore be applied once, to the averaged estimate $\bar{\mathbf{m}}_K$, and not to individual permutation samples. If $g$ is continuous at $\boldsymbol{\phi}(v)$, then $g(\bar{\mathbf{m}}_K) \to g(\boldsymbol{\phi}(v))$ almost surely by the strong law of large numbers and the continuous mapping theorem. For the same reason, and by Proposition~\ref{prop:link_impossibility}, value functions over several components should be aggregated \emph{before} the link is applied.
+
+\paragraph{Error amplification.}
+Consistency does not quantify how much the link amplifies the estimation error. The following addresses this question through smoothness of the link function.
+
+\begin{proposition}[Lipschitz bounds]\label{prop:link_lipschitz}
+Let $\boldsymbol{\phi}, \boldsymbol{\phi}' \in \mathbb{R}^n$.
+\begin{enumerate}
+    \item[(i)] If $\mathbf{1}^\top \boldsymbol{\phi}^+ > 0$ and $\mathbf{1}^\top \boldsymbol{\phi}'^+ > 0$, then $\big\| g^{\text{rect}}(\boldsymbol{\phi}) - g^{\text{rect}}(\boldsymbol{\phi}') \big\|_1 \le 2\, \|\boldsymbol{\phi} - \boldsymbol{\phi}'\|_1 / \mathbf{1}^\top \boldsymbol{\phi}^+$.
+    \item[(ii)] If $T := \mathbf{1}^\top \boldsymbol{\phi} > 0$ and $T' := \mathbf{1}^\top \boldsymbol{\phi}' > 0$, then $\big\| g^{\text{lin}}(\boldsymbol{\phi}) - g^{\text{lin}}(\boldsymbol{\phi}') \big\|_1 \le \big( \|\boldsymbol{\phi} - \boldsymbol{\phi}'\|_1 / T \big) \big( 1 + \|\boldsymbol{\phi}'\|_1 / T' \big)$.
+\end{enumerate}
+\end{proposition}
+
+\begin{proof}
+(i) Let $\mathbf{a} := \boldsymbol{\phi}^+$, $\mathbf{b} := \boldsymbol{\phi}'^+$, $A := \mathbf{1}^\top \mathbf{a}$ and $B := \mathbf{1}^\top \mathbf{b}$. Then $\|\mathbf{a}/A - \mathbf{b}/B\|_1 \le \|\mathbf{a} - \mathbf{b}\|_1 / A + B\, |1/A - 1/B| = (\|\mathbf{a} - \mathbf{b}\|_1 + |B - A|)/A \le 2\|\mathbf{a} - \mathbf{b}\|_1 / A$, and $x \mapsto x^+$ is $1$-Lipschitz. (ii) Write $\boldsymbol{\phi}/T - \boldsymbol{\phi}'/T' = (\boldsymbol{\phi} - \boldsymbol{\phi}')/T + \boldsymbol{\phi}'(T' - T)/(T T')$ and use $|T' - T| \le \|\boldsymbol{\phi} - \boldsymbol{\phi}'\|_1$.
+\end{proof}
+
+Combined with Theorem~\ref{thm:bernstein_shapley}, (i) gives a finite-sample guarantee: if $\|\bar{\mathbf{m}}_K - \boldsymbol{\phi}(v)\|_\infty \le \epsilon$ and $\mathbf{1}^\top \bar{\mathbf{m}}_K^+ > 0$, then $\|g^{\text{rect}}(\bar{\mathbf{m}}_K) - g^{\text{rect}}(\boldsymbol{\phi}(v))\|_1 \le 2n\epsilon / \mathbf{1}^\top \boldsymbol{\phi}(v)^+$. The rectified link is thus stable unless the total positive credit is small. By (ii), the linear link amplifies errors by the factor $\|\boldsymbol{\phi}'\|_1 / T'$, which equals one for non-negative vectors but becomes large when positive and negative Shapley values cancel. The power link with $\gamma < 1$ is not Lipschitz at zero, since $x \mapsto x^\gamma$ has unbounded slope there. The floor-shifted link is discontinuous at vectors with equal entries: for every $\epsilon > 0$, it maps $(\epsilon, 0, \dots, 0)^\top$ to $\mathbf{e}_1$, but $\mathbf{0}$ to $\mathbf{1}/n$.
+
+
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+% OLD version
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+% \section{Cooperative Game Formulation of Attribution Problem}
+% \label{sec:coop_game}
+
+% We model the distribution of the context share as a cooperative game $([n], v)$ defined by a characteristic value function $v: 2^{[n]} \to \mathbb{R}$ with $v(\emptyset) = 0$, where $v(S')$ quantifies how well the sub-collection $S'$ explains the response $r$. The marginal contribution of snippet $i \in [n]$ to a subset $S' \subseteq [n] \setminus \{i\}$ is $\Delta v(S', i) := v(S' \cup \{i\}) - v(S')$. The exact Shapley value~\cite{shapley1953value} $\phi_i(v) \in \mathbb{R}$ of snippet $i$ is
+% \begin{align}\label{eq:shapley_def}
+%     \phi_i(v) := \sum_{S' \subseteq [n] \setminus \{i\}} \frac{|S'|!\,(n - |S'| - 1)!}{n!} \, \Delta v(S', i).
+% \end{align}
+% The raw allocations $\boldsymbol{\phi}(v) = (\phi_1(v), \dots, \phi_n(v))^\top$ may be negative, e.g., when a snippet contradicts the response, and they are measured in the units of $v$. They are therefore mapped to the $w$-scaled simplex through a \emph{link function}, which we study in Section~\ref{subsec:link_functions}.
+
+% \paragraph{Why Shapley Values?}
+% The Shapley value is the unique allocation rule satisfying four axioms~\cite{shapley1953value}, each of which corresponds to a natural requirement on source attribution:
+% \begin{itemize}
+%     \item \textbf{Efficiency:} $\sum_{i=1}^n \phi_i(v) = v([n])$. The total utility of the full context is distributed among the snippets without loss or double counting, which matches the credit conservation in~\eqref{eq:model_contribution}.
+%     \item \textbf{Symmetry:} if $v(S' \cup \{i\}) = v(S' \cup \{j\})$ for all $S' \subseteq [n] \setminus \{i, j\}$, then $\phi_i(v) = \phi_j(v)$. In particular, identical (or interchangeable) snippets receive identical credit.
+%     \item \textbf{Null player:} if $\Delta v(S', i) = 0$ for all $S' \subseteq [n] \setminus \{i\}$, then $\phi_i(v) = 0$. Irrelevant snippets receive no credit.
+%     \item \textbf{Linearity:} $\boldsymbol{\phi}(a v + b u) = a \boldsymbol{\phi}(v) + b \boldsymbol{\phi}(u)$ for all $a, b \in \mathbb{R}$. As a consequence, value functions defined over several components (e.g., response segments or attention heads) can be aggregated consistently.
+% \end{itemize}
+% Beyond these axioms, the Shapley value averages the marginal contribution of each snippet over all $n!$ arrival orders, and so it accounts for \emph{interactions} between snippets. Redundant snippets (substitutes) split the credit rather than cancel each other out; note that leave-one-out scores would assign zero credit to both copies of a duplicated snippet. Conversely, snippets that are only jointly informative (complements, e.g., distributed evidence) are both credited, whereas single-snippet scores would miss their synergy. Finally, the Shapley value only requires oracle access to $v$, so the same attribution machinery applies to the likelihood-based value function of Section~\ref{sec:llh_shapley} as well as to the geometric value functions introduced in this work. However, the axioms are only meaningful if $v$ is a genuine set function, i.e., $v(S')$ does not depend on the order in which the snippets of $S'$ are presented. Likelihood-based value functions violate this requirement, whereas embedding-based value functions satisfy it by construction.
+
+% \subsection{Link Functions}
+% \label{subsec:link_functions}
+
+% Let $\Delta^{n-1} := \{\mathbf{a} \in \mathbb{R}^n_{\ge 0} : \mathbf{1}^\top \mathbf{a} = 1\}$ denote the probability simplex, $\mathbf{1}$ the all-ones vector, and $x^+ := \max(0, x)$, applied entrywise to vectors.
+
+% \begin{definition}[Link function]\label{def:link}
+% A \textbf{link function} is a map $g: \mathcal{D}_g \to \Delta^{n-1}$ defined on a domain $\mathcal{D}_g \subseteq \mathbb{R}^n$. Given a game $([n], v)$ with $\boldsymbol{\phi}(v) \in \mathcal{D}_g$ and a global context weight $w \in [0,1]$, the snippet contributions are
+% \begin{align}\label{eq:link}
+%     \boldsymbol{\alpha} := w \cdot g\big(\boldsymbol{\phi}(v)\big), \qquad \alpha_{\text{model}} := 1 - w,
+% \end{align}
+% which satisfies the credit conservation~\eqref{eq:model_contribution} by construction. If $\boldsymbol{\phi}(v) \notin \mathcal{D}_g$ (no snippet carries positive credit), we use the convention $\boldsymbol{\alpha} := \mathbf{0}$ and $\alpha_{\text{model}} := 1$.
+% \end{definition}
+
+% Throughout, we assume that larger values of $v$ mean that the response is \emph{better} explained. For value functions of the opposite polarity, such as the log-distance $v_{\log}$, whose marginal gains are non-positive, the link is applied to the Shapley values of $-v_{\log}$.
+
+% \paragraph{Desirable properties.}
+% A link function should keep, as far as possible, the axioms that motivated the Shapley value in the first place. We formalize this with the following properties, stated for all $\boldsymbol{\phi} \in \mathcal{D}_g$:
+% \begin{enumerate}
+%     \item[(P1)] \textbf{Symmetry (permutation equivariance):} $g(\sigma \boldsymbol{\phi}) = \sigma\, g(\boldsymbol{\phi})$ for every permutation $\sigma$ of $[n]$. Together with the Symmetry axiom, interchangeable snippets receive identical contributions.
+%     \item[(P2)] \textbf{Null player:} $\phi_i = 0 \Rightarrow g_i(\boldsymbol{\phi}) = 0$. Irrelevant snippets receive no contribution.
+%     \item[(P3)] \textbf{Scale invariance:} $g(c\boldsymbol{\phi}) = g(\boldsymbol{\phi})$ for all $c > 0$. Combined with the homogeneity implied by Linearity, $\boldsymbol{\phi}(cv) = c\boldsymbol{\phi}(v)$, contributions do not depend on the units of $v$ (e.g., nats vs.\ bits, or a rescaled embedding geometry).
+%     \item[(P4)] \textbf{Faithfulness:} if $\boldsymbol{\phi} \in \mathbb{R}^n_{\ge 0} \setminus \{\mathbf{0}\}$, then $g(\boldsymbol{\phi}) = \boldsymbol{\phi} / \mathbf{1}^\top \boldsymbol{\phi}$. By Efficiency, $\mathbf{1}^\top \boldsymbol{\phi}(v) = v([n])$, so $\alpha_i = w\, \phi_i(v) / v([n])$: whenever the Shapley vector is already a valid credit vector, the link does not distort it.
+%     \item[(P5)] \textbf{Sign consistency:} $\phi_i \le 0 \Rightarrow g_i(\boldsymbol{\phi}) = 0$. Snippets that do not support (or contradict) the response receive no credit.
+%     \item[(P6)] \textbf{Aggregation consistency:} for any two games $u, v$ with $u([n]), v([n]) > 0$,
+%     \begin{align*}
+%         g\big(\boldsymbol{\phi}(u + v)\big) = \frac{u([n])\, g\big(\boldsymbol{\phi}(u)\big) + v([n])\, g\big(\boldsymbol{\phi}(v)\big)}{u([n]) + v([n])}.
+%     \end{align*}
+%     This is the analogue of Linearity: contributions computed on components (response segments, attention heads) combine into the contributions of the aggregated game as a value-weighted average.
+%     \item[(P7)] \textbf{Continuity} of $g$ on $\mathcal{D}_g$. Together with the strong law of large numbers and the continuous mapping theorem, $g(\bar{\mathbf{m}}_K) \to g(\boldsymbol{\Phi}(v))$ almost surely for the Monte Carlo estimator of Lemma~\ref{lemma:unbiased_estimator}.
+% \end{enumerate}
+
+% \paragraph{Candidate link functions.}
+% \begin{itemize}
+%     \item \textbf{Linear link:} $g^{\text{lin}}(\boldsymbol{\phi}) := \boldsymbol{\phi} / \mathbf{1}^\top \boldsymbol{\phi}$ on $\mathcal{D} = \{\mathbf{1}^\top \boldsymbol{\phi} > 0\}$. This is the exact efficient normalization $\phi_i(v) / v([n])$. Its values sum to one but may be negative (contradicting snippets) or exceed one, so it maps to the affine hull of $\Delta^{n-1}$ rather than to the simplex itself.
+%     \item \textbf{Rectified link}~\cite{nematov2025source}: $g^{\text{rect}}(\boldsymbol{\phi}) := \boldsymbol{\phi}^+ / \mathbf{1}^\top \boldsymbol{\phi}^+$ on $\mathcal{D} = \{\mathbf{1}^\top \boldsymbol{\phi}^+ > 0\}$. It is \emph{ratio preserving} on the supporting snippets, $\alpha_i / \alpha_j = \phi_i / \phi_j$ whenever $\phi_i, \phi_j > 0$, but it ignores the magnitude of negative Shapley values altogether.
+%     \item \textbf{Sparsemax link}~\cite{martins2016softmax}: $g^{\text{sp}}(\boldsymbol{\phi}) := \operatorname{Proj}_{\Delta^{n-1}}\big(\boldsymbol{\phi} / \mathbf{1}^\top \boldsymbol{\phi}\big)$ on $\mathcal{D} = \{\mathbf{1}^\top \boldsymbol{\phi} > 0\}$, where $\operatorname{Proj}_{\Delta^{n-1}}(\mathbf{x}) := \arg\min_{\mathbf{a} \in \Delta^{n-1}} \|\mathbf{a} - \mathbf{x}\|_2$ has the closed form $a_i = (x_i - \tau)^+$, with $\tau$ the unique solution of $\sum_i (x_i - \tau)^+ = 1$. It is the simplex point closest to the efficient normalization $g^{\text{lin}}$. Since $\sum_i x_i^+ \ge \sum_i x_i = 1$, we have $\tau \ge 0$. Hence it is \emph{difference preserving} on its support, $\alpha_i - \alpha_j = w (\phi_i - \phi_j) / v([n])$, and the negative mass is paid uniformly by the supporting snippets.
+%     \item \textbf{Power link:} $g^{\gamma}_i(\boldsymbol{\phi}) := (\phi_i^+)^\gamma / \sum_j (\phi_j^+)^\gamma$ for $\gamma > 0$. It recovers $g^{\text{rect}}$ for $\gamma = 1$, sharpens towards the $\arg\max$ for $\gamma > 1$, and flattens towards the uniform distribution on the support for $\gamma < 1$.
+%     \item \textbf{Softmax link:} $g^{\text{soft}}_i(\boldsymbol{\phi}) := \exp(\phi_i / \tau) / \sum_j \exp(\phi_j / \tau)$ with temperature $\tau > 0$, defined on all of $\mathbb{R}^n$. It is smooth and strictly positive, which is convenient for gradient-based training (cf.\ the listwise loss~\eqref{eq:listwise_loss}), but $\tau$ is measured in the units of $v$.
+%     \item \textbf{Absolute link:} $g^{\text{abs}}(\boldsymbol{\phi}) := |\boldsymbol{\phi}| / \mathbf{1}^\top |\boldsymbol{\phi}|$. It measures \emph{influence} rather than \emph{support}: a strongly contradicting snippet receives a large share.
+% \end{itemize}
+
+% \begin{table}[h]
+% \centering
+% \small
+% \begin{tabular}{lcccccccc}
+% \hline
+% \textbf{Link} & \textbf{Simplex} & \textbf{P1} & \textbf{P2} & \textbf{P3} & \textbf{P4} & \textbf{P5} & \textbf{P6} & \textbf{P7} \\ \hline
+% Linear $g^{\text{lin}}$            & $\times$   & \checkmark & \checkmark & \checkmark & \checkmark & $\times$   & \checkmark & \checkmark \\
+% Rectified $g^{\text{rect}}$        & \checkmark & \checkmark & \checkmark & \checkmark & \checkmark & \checkmark & $(\ast)$   & \checkmark \\
+% Sparsemax $g^{\text{sp}}$          & \checkmark & \checkmark & \checkmark & \checkmark & \checkmark & \checkmark & $(\ast)$   & \checkmark \\
+% Power $g^{\gamma}$, $\gamma \neq 1$ & \checkmark & \checkmark & \checkmark & \checkmark & $\times$   & \checkmark & $\times$   & \checkmark \\
+% Softmax $g^{\text{soft}}$          & \checkmark & \checkmark & $\times$   & $\times$   & $\times$   & $\times$   & $\times$   & \checkmark \\
+% Absolute $g^{\text{abs}}$          & \checkmark & \checkmark & \checkmark & \checkmark & \checkmark & $\times$   & $(\ast)$   & \checkmark \\ \hline
+% \end{tabular}
+% \caption{Properties of the candidate link functions. $(\ast)$: holds whenever the Shapley vectors of the games involved are non-negative, in which case the link coincides with $g^{\text{lin}}$ by (P4).}
+% \label{tab:link_properties}
+% \end{table}
+
+% None of the simplex-valued links satisfies aggregation consistency (P6) in general. The following proposition shows that this is not a shortcoming of the particular candidates, but an inherent tension between Linearity and non-negativity.
+
+% \begin{proposition}\label{prop:link_impossibility}
+% Let $n \ge 2$. There is no link function $g$ with values in $\Delta^{n-1}$ that satisfies both Faithfulness (P4) and Aggregation consistency (P6) for all games with positive total value.
+% \end{proposition}
+
+% \begin{proof}
+% Take $\boldsymbol{\phi} \in \mathbb{R}^n$ with $t := \mathbf{1}^\top \boldsymbol{\phi} > 0$ and $\phi_1 < 0$, e.g., $\boldsymbol{\phi} = (-1, 2, 0, \dots, 0)^\top$. The additive game $u(S') := \sum_{i \in S'} \phi_i$ has Shapley vector $\boldsymbol{\phi}(u) = \boldsymbol{\phi}$, and the game $c(S') := \lambda |S'|$ with $\lambda \ge |\phi_1|$ has $\boldsymbol{\phi}(c) = \lambda \mathbf{1}$ and $c([n]) = n\lambda$. The sum $u + c$ is additive with Shapley vector $\boldsymbol{\phi} + \lambda \mathbf{1} \in \mathbb{R}^n_{\ge 0} \setminus \{\mathbf{0}\}$. By (P4), $g(\boldsymbol{\phi} + \lambda \mathbf{1}) = (\boldsymbol{\phi} + \lambda \mathbf{1}) / (t + n\lambda)$ and $g(\lambda \mathbf{1}) = \mathbf{1}/n$. By (P6),
+% \begin{align*}
+%     \frac{\boldsymbol{\phi} + \lambda \mathbf{1}}{t + n\lambda} = \frac{t\, g(\boldsymbol{\phi}) + n\lambda \cdot \mathbf{1}/n}{t + n\lambda},
+% \end{align*}
+% hence $g(\boldsymbol{\phi}) = \boldsymbol{\phi} / t$, whose first entry $\phi_1 / t$ is negative. This contradicts $g(\boldsymbol{\phi}) \in \Delta^{n-1}$.
+% \end{proof}
+
+% Proposition~\ref{prop:link_impossibility} turns the choice of link function into an explicit trade-off. The linear link keeps every Shapley axiom, including Linearity through (P6), at the price of signed contributions; it is the natural choice for diagnostic analyses in which contradicting snippets should be visible as negative credit. Among the simplex-valued links, the rectified and the sparsemax links are the only candidates that satisfy (P1)--(P5) and (P7), and both coincide with the linear link whenever all Shapley values are non-negative. They differ only in how negative Shapley mass is handled: the rectified link discards it and preserves the ratios between the supporting snippets, whereas the sparsemax link charges it uniformly to the supporting snippets and preserves their differences, yielding the minimal Euclidean distortion of the efficient normalization. The power and softmax links give up Faithfulness for a tunable sharpness, and the absolute link should only be used when influence, rather than support, is the quantity of interest.
+
+% \begin{remark}[Order of aggregation and linking]
+% All link functions above are non-linear, so they do not commute with expectation: in general $\mathbb{E}_\pi[g(\mathbf{m}^\pi)] \neq g(\mathbb{E}_\pi[\mathbf{m}^\pi]) = g(\boldsymbol{\Phi}(v))$. When the Shapley vector is approximated by Monte Carlo sampling, the link must therefore be applied once, to the aggregated estimate $\bar{\mathbf{m}}_K$, and not to the individual permutation samples. By (P7), $g(\bar{\mathbf{m}}_K)$ is then a consistent estimator of $g(\boldsymbol{\Phi}(v))$. Similarly, by Proposition~\ref{prop:link_impossibility}, value functions over several components should be aggregated \emph{before} the link is applied.
+% \end{remark}
+
+
+
+% \subsection{Which Link Functions Preserve the Shapley Axioms?}
+% \label{subsec:link_axioms}
+
+% Properties (P1)--(P7) are stated for $g$ as a map on $\mathbb{R}^n$. To see which guarantees of the Shapley value survive the link, we view the composition
+% \begin{align}
+%     \psi_g(v) := g\big(\boldsymbol{\phi}(v)\big) \in \Delta^{n-1}
+% \end{align}
+% as an allocation rule on games $v$ with $\boldsymbol{\phi}(v) \in \mathcal{D}_g$. The global weight only rescales, $\boldsymbol{\alpha} = w\, \psi_g(v)$, so we omit it. We ask which of the following game-level axioms $\psi_g$ satisfies:
+% \begin{enumerate}
+%     \item[(G1)] \textbf{Normalized efficiency:} $\mathbf{1}^\top \psi_g(v) = 1$.
+%     \item[(G2)] \textbf{Symmetry:} if $v(S' \cup \{i\}) = v(S' \cup \{j\})$ for all $S' \subseteq [n] \setminus \{i,j\}$, then $\psi_{g,i}(v) = \psi_{g,j}(v)$.
+%     \item[(G3)] \textbf{Null player:} if $\Delta v(S', i) = 0$ for all $S'$, then $\psi_{g,i}(v) = 0$.
+%     \item[(G4)] \textbf{Desirability:} if $v(S' \cup \{i\}) \ge v(S' \cup \{j\})$ for all $S' \subseteq [n] \setminus \{i,j\}$, i.e., snippet $i$ is at least as useful as snippet $j$ in every context, then $\psi_{g,i}(v) \ge \psi_{g,j}(v)$.
+%     \item[(G5)] \textbf{Aggregation consistency:} (P6), stated for games.
+%     \item[(G6)] \textbf{Strong monotonicity}~\cite{young1985monotonic}: if $\Delta u(S', i) \ge \Delta v(S', i)$ for all $S' \subseteq [n] \setminus \{i\}$, then $\psi_{g,i}(u) \ge \psi_{g,i}(v)$.
+% \end{enumerate}
+% The Shapley value itself satisfies the unnormalized versions of all six. For (G4), this follows from the following identity.
+
+% \begin{lemma}[Desirability of the Shapley value]\label{lem:desirability}
+% For all $i \neq j$,
+% \begin{align}
+%     \phi_i(v) - \phi_j(v) = \sum_{S' \subseteq [n] \setminus \{i,j\}} \frac{|S'|!\,(n - |S'| - 2)!}{(n-1)!} \big( v(S' \cup \{i\}) - v(S' \cup \{j\}) \big).
+% \end{align}
+% In particular, if $v(S' \cup \{i\}) \ge v(S' \cup \{j\})$ for all $S' \subseteq [n] \setminus \{i,j\}$, then $\phi_i(v) \ge \phi_j(v)$.
+% \end{lemma}
+
+% \begin{proof}
+% Let $\gamma(s) := s!(n-s-1)!/n!$. Split the sum in~\eqref{eq:shapley_def} for $\phi_i$ according to whether the coalition contains $j$, i.e., write it as $S'$ or $S' \cup \{j\}$ with $S' \subseteq [n] \setminus \{i,j\}$, and do the same for $\phi_j$. The terms $v(S')$ and $v(S' \cup \{i,j\})$ cancel in the difference, leaving $\big(\gamma(|S'|) + \gamma(|S'|+1)\big)\big(v(S' \cup \{i\}) - v(S' \cup \{j\})\big)$. Finally, $\gamma(s) + \gamma(s+1) = \frac{s!(n-s-2)!}{n!}\big((n-s-1) + (s+1)\big) = \frac{s!(n-s-2)!}{(n-1)!}$.
+% \end{proof}
+
+% The next proposition shows how the vector-level properties of $g$ transfer to $\psi_g$.
+
+% \begin{proposition}[Transfer of axioms]\label{prop:axiom_transfer}
+% Let $g$ be a link function.
+% \begin{enumerate}
+%     \item[(i)] If $g$ takes values in $\Delta^{n-1}$ (or in its affine hull), then $\psi_g$ satisfies (G1).
+%     \item[(ii)] If $g$ satisfies (P1), then $\psi_g$ satisfies (G2).
+%     \item[(iii)] If $g$ satisfies (P2), then $\psi_g$ satisfies (G3).
+%     \item[(iv)] If $g$ is \emph{order preserving}, i.e., $\phi_i \ge \phi_j \Rightarrow g_i(\boldsymbol{\phi}) \ge g_j(\boldsymbol{\phi})$, then $\psi_g$ satisfies (G4).
+% \end{enumerate}
+% \end{proposition}
+
+% \begin{proof}
+% (i) is immediate. (ii) By the Symmetry axiom, $\phi_i(v) = \phi_j(v)$, so the transposition $\sigma = (i\,j)$ fixes $\boldsymbol{\phi}(v)$, and (P1) gives $g(\boldsymbol{\phi}) = g(\sigma\boldsymbol{\phi}) = \sigma g(\boldsymbol{\phi})$, i.e., $g_i = g_j$. (iii) By the Null player axiom, $\phi_i(v) = 0$; apply (P2). (iv) By Lemma~\ref{lem:desirability}, $\phi_i(v) \ge \phi_j(v)$; apply order preservation.
+% \end{proof}
+
+% Proposition~\ref{prop:link_impossibility} already shows that no simplex-valued link satisfies (G5) together with Faithfulness. The situation for (G6) is even more restrictive: it fails for \emph{every} faithful link, including the linear one.
+
+% \begin{proposition}[Normalization destroys strong monotonicity]\label{prop:no_strong_monotonicity}
+% Let $n \ge 2$. If $g$ satisfies Faithfulness (P4), then $\psi_g$ violates (G6).
+% \end{proposition}
+
+% \begin{proof}
+% Let $u(S') := |S'|$ and $v(S') := |S'| + 2 \cdot \mathbb{1}[2 \in S']$. Both games are additive, with $\boldsymbol{\phi}(u) = \mathbf{1}$ and $\boldsymbol{\phi}(v) = (1, 3, 1, \dots, 1)^\top$. Snippet $1$ has the same marginal contributions in both games, $\Delta u(S', 1) = \Delta v(S', 1) = 1$ for all $S'$, so (G6) requires $\psi_{g,1}(v) = \psi_{g,1}(u)$. By (P4), however, $\psi_{g,1}(u) = 1/n$, whereas $\psi_{g,1}(v) = 1/(n+2)$.
+% \end{proof}
+
+% Young~\cite{young1985monotonic} showed that efficiency, symmetry and strong monotonicity characterize the Shapley value. By Proposition~\ref{prop:no_strong_monotonicity}, no normalized attribution rule is a Shapley value in this axiomatic sense: contributions are \emph{relative} quantities, and a snippet's share may decrease although its own marginal contributions are unchanged, simply because another snippet became more useful. This is a property of normalization itself, shared by the algorithm of~\cite{nematov2025source}, and not a shortcoming of a particular link. The axioms (G1)--(G4) and, where possible, (G5) are the strongest guarantees one can hope for.
+
+% \paragraph{Which links destroy which axioms.}
+% Combining Proposition~\ref{prop:axiom_transfer} with the properties of the individual links (Table~\ref{tab:link_axioms}) gives the following picture.
+% \begin{itemize}
+%     \item \textbf{Softmax} destroys the Null player axiom (G3): every snippet, including a null player, receives at least $\min_j e^{(\phi_{\min} - \phi_j)/\tau}/n > 0$. It also violates (P3), so its contributions depend on the units of $v$. In the limits, it becomes uniform as $\tau \to \infty$ and degenerates to $\arg\max$ as $\tau \to 0$.
+%     \item \textbf{Absolute} destroys Desirability (G4). For $\boldsymbol{\phi} = (-3, 1, 1)^\top$, it returns $(0.6, 0.2, 0.2)^\top$, ranking a contradicting snippet above two supporting ones.
+%     \item \textbf{Floor-shifted} (Definition~\ref{def:floor_link}) destroys the Null player axiom (G3) and Sign consistency (P5), and it always assigns zero to the snippet with the smallest Shapley value, even if it supports the response. In exchange, it is the only candidate invariant to a common offset $b\mathbf{1}$, and it preserves the ordering.
+%     \item \textbf{Power} with $\gamma \neq 1$ preserves (G1)--(G4) but destroys Faithfulness and hence (G5). Its contributions are no longer proportional to the Shapley values even when these are non-negative.
+%     \item \textbf{Rectified} and \textbf{sparsemax} preserve (G1)--(G4). They lose (G5) only when some Shapley values are negative, and they differ only in how this negative mass is redistributed.
+%     \item \textbf{Linear} preserves (G1)--(G5) but leaves the simplex.
+% \end{itemize}
+% In particular, if the value function is monotone, then all marginal gains, and hence all Shapley values, are non-negative. The linear, rectified, sparsemax and absolute links then coincide, and $\psi_g$ satisfies (G1)--(G5). The log-volume value function $v_{\text{logvol}}$ of Section~\ref{subsec:geometric_values} has this property. With a monotone value function and a faithful link, nothing is lost except (G6), which no normalized rule can satisfy.
+
+% \begin{remark}[The linear link and the likelihood-based global weight]\label{rem:linear_llh}
+% For the log-likelihood value function, the global weight of~\cite{nematov2025source} is itself an efficient normalization. With $L_S := \log P(r \mid p, S)$ and $L_\emptyset := \log P(r \mid p) < 0$, we have $1 - L_S / L_\emptyset = (L_S - L_\emptyset)/(-L_\emptyset) = v_{\text{LL}}([n]) / (-L_\emptyset)$. Hence, whenever $v_{\text{LL}}([n]) > 0$, the linear link yields
+% \begin{align}
+%     \alpha_i = w \, \frac{\phi_i(v_{\text{LL}})}{v_{\text{LL}}([n])} = \frac{\phi_i(v_{\text{LL}})}{-\log P(r \mid p)}.
+% \end{align}
+% For a fixed instance, $\boldsymbol{\alpha}$ is a \emph{linear} function of $v_{\text{LL}}$: each snippet receives its Shapley value measured in units of the baseline surprisal of the response. Every other link departs from this linear allocation. For geometric value functions, $w$ and $v([n])$ are computed from different models, and this identity does not hold.
+% \end{remark}
+
+% \paragraph{Statistical stability.}
+% When $\boldsymbol{\phi}$ is estimated by Monte Carlo sampling (Lemma~\ref{lemma:unbiased_estimator}), the link should not amplify the estimation error. Continuity (P7) only gives consistency. The following bounds quantify the amplification.
+
+% \begin{proposition}[Lipschitz bounds]\label{prop:link_lipschitz}
+% Let $\boldsymbol{\phi}, \boldsymbol{\phi}' \in \mathbb{R}^n$.
+% \begin{enumerate}
+%     \item[(i)] If $\mathbf{1}^\top \boldsymbol{\phi}^+ > 0$ and $\mathbf{1}^\top \boldsymbol{\phi}'^+ > 0$, then $\big\| g^{\text{rect}}(\boldsymbol{\phi}) - g^{\text{rect}}(\boldsymbol{\phi}') \big\|_1 \le \dfrac{2\, \|\boldsymbol{\phi} - \boldsymbol{\phi}'\|_1}{\mathbf{1}^\top \boldsymbol{\phi}^+}$.
+%     \item[(ii)] If $T := \mathbf{1}^\top \boldsymbol{\phi} > 0$ and $T' := \mathbf{1}^\top \boldsymbol{\phi}' > 0$, then $\big\| g^{\text{lin}}(\boldsymbol{\phi}) - g^{\text{lin}}(\boldsymbol{\phi}') \big\|_1 \le \dfrac{\|\boldsymbol{\phi} - \boldsymbol{\phi}'\|_1}{T} \Big( 1 + \dfrac{\|\boldsymbol{\phi}'\|_1}{T'} \Big)$.
+% \end{enumerate}
+% \end{proposition}
+
+% \begin{proof}
+% (i) Let $\mathbf{a} := \boldsymbol{\phi}^+$, $\mathbf{b} := \boldsymbol{\phi}'^+$, $A := \mathbf{1}^\top \mathbf{a}$ and $B := \mathbf{1}^\top \mathbf{b}$. Then $\|\mathbf{a}/A - \mathbf{b}/B\|_1 \le \|\mathbf{a} - \mathbf{b}\|_1 / A + \|\mathbf{b}\|_1 |1/A - 1/B| = (\|\mathbf{a} - \mathbf{b}\|_1 + |B - A|)/A \le 2\|\mathbf{a} - \mathbf{b}\|_1 / A$, and $x \mapsto x^+$ is $1$-Lipschitz. (ii) Write $\boldsymbol{\phi}/T - \boldsymbol{\phi}'/T' = (\boldsymbol{\phi} - \boldsymbol{\phi}')/T + \boldsymbol{\phi}'(T' - T)/(T T')$ and use $|T' - T| \le \|\boldsymbol{\phi} - \boldsymbol{\phi}'\|_1$.
+% \end{proof}
+
+% Combined with Theorem~\ref{thm:bernstein_shapley}, (i) yields a finite-sample guarantee: if $\|\bar{\mathbf{m}}_K - \boldsymbol{\Phi}(v)\|_\infty \le \epsilon$ and $\epsilon$ is small enough that $\mathbf{1}^\top \bar{\mathbf{m}}_K^+ > 0$, then $\|g^{\text{rect}}(\bar{\mathbf{m}}_K) - g^{\text{rect}}(\boldsymbol{\Phi}(v))\|_1 \le 2n\epsilon / \mathbf{1}^\top \boldsymbol{\Phi}(v)^+$. The rectified link is thus stable unless the total positive credit is small. By (ii), the linear link amplifies errors by the factor $\|\boldsymbol{\phi}'\|_1 / T' \ge 1$, which equals one for non-negative vectors but becomes large when positive and negative Shapley values cancel. The remaining links are less stable. The power link with $\gamma < 1$ is not Lipschitz at $0$, since $x \mapsto x^\gamma$ has unbounded slope there. The floor-shifted link is discontinuous at vectors with equal entries: for small $\epsilon > 0$, it maps $(\epsilon, 0, \dots, 0)$ to $\mathbf{e}_1$, but $\mathbf{0}$ to $\mathbf{1}/n$.
+
+% \begin{table}[h]
+% \centering
+% \small
+% \begin{tabular}{lccccccc}
+% \hline
+% \textbf{Link} & \textbf{(G1)} & \textbf{(G2)} & \textbf{(G3)} & \textbf{(G4)} & \textbf{(G5)} & \textbf{Offset inv.} & \textbf{Lipschitz} \\ \hline
+% Linear $g^{\text{lin}}$                 & aff.\       & \checkmark & \checkmark & \checkmark & \checkmark & $\times$   & \checkmark$^\dagger$ \\
+% Rectified $g^{\text{rect}}$             & \checkmark  & \checkmark & \checkmark & \checkmark & $(\ast)$   & $\times$   & \checkmark \\
+% Sparsemax $g^{\text{sp}}$               & \checkmark  & \checkmark & \checkmark & \checkmark & $(\ast)$   & $\times$   & \checkmark \\
+% Power $g^{\gamma}$, $\gamma \neq 1$     & \checkmark  & \checkmark & \checkmark & \checkmark & $\times$   & $\times$   & $\gamma \ge 1$ \\
+% Softmax $g^{\text{soft}}$               & \checkmark  & \checkmark & $\times$   & \checkmark & $\times$   & \checkmark & \checkmark \\
+% Absolute $g^{\text{abs}}$               & \checkmark  & \checkmark & \checkmark & $\times$   & $(\ast)$   & $\times$   & \checkmark \\
+% Floor-shifted $g^{\text{fl},\gamma}$    & \checkmark  & \checkmark & $\times$   & \checkmark & $\times$   & \checkmark & $\times$ \\ \hline
+% \end{tabular}
+% \caption{Game-level axioms preserved by the link functions. ``aff.'': values sum to one but may leave the simplex. $(\ast)$: holds whenever the Shapley vectors involved are non-negative, e.g., for monotone value functions. ``Offset inv.'': $g(\boldsymbol{\phi} + b\mathbf{1}) = g(\boldsymbol{\phi})$. $\dagger$: with error amplification $\|\boldsymbol{\phi}\|_1 / \mathbf{1}^\top \boldsymbol{\phi}$ (Proposition~\ref{prop:link_lipschitz}). Lipschitz continuity is on compact subsets of the domain; the power link is Lipschitz there only for $\gamma \ge 1$. No link satisfies (G6) (Proposition~\ref{prop:no_strong_monotonicity}).}
+% \label{tab:link_axioms}
+% \end{table}
+

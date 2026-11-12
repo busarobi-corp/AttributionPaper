@@ -1,0 +1,1251 @@
+\documentclass{article}
+
+% Language setting
+% Replace `english' with e.g. `spanish' to change the document language
+\usepackage[english]{babel}
+\usepackage{amssymb}
+% Set page size and margins
+% Replace `letterpaper' with `a4paper' for UK/EU standard size
+\usepackage[letterpaper,top=2cm,bottom=2cm,left=3cm,right=3cm,marginparwidth=1.75cm]{geometry}
+
+
+% Useful packages
+\usepackage{booktabs}
+\usepackage{amsmath}
+\usepackage{amsthm}
+\usepackage{graphicx}
+\usepackage[colorlinks=true, allcolors=blue]{hyperref}
+\usepackage{tikz}
+\usetikzlibrary{positioning}
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+\newtheorem{example}{Example} 
+\newtheorem{theorem}{Theorem}
+\newtheorem{lemma}[theorem]{Lemma} 
+\newtheorem{Theorem}[theorem]{Theorem} 
+\newtheorem{remark}[theorem]{Remark}
+\newtheorem{corollary}[theorem]{Corollary}
+\newtheorem{definition}[theorem]{Definition}
+\newtheorem{conjecture}[theorem]{Conjecture}
+\newtheorem{axiom}[theorem]{Axiom}
+\newtheorem{proposition}{Proposition}
+\newtheorem{condition}{Condition}
+\newenvironment{proofof}[1]{\begin{proof}\textbf{of {#1}}}{\end{proof}}
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+
+
+\title{Attribution for LLMs via Subspace Geometry}
+\author{You}
+
+
+\date{\today}
+
+\author{R\'{o}bert Busa-Fekete\footnote{Google Research, NY, USA, \texttt{busarobi@google.com}}, Natalia Ponomareva\footnote{Google Research, NY, USA, \texttt{nponomareva@google.com}}, Sergei Vassilvitskii \footnote{Google Research, NY, USA, \texttt{sergeiv@google.com}},\\ 
+David Wood\footnote{Google DeepMind, NY, USA, \texttt{davwood@google.com}}}
+
+
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+Which retrieved snippets support a response of a large language model (LLM), and how much of the response comes from the model's own parametric knowledge? Shapley-value attribution answers this question axiomatically, but its most organic value function, the log-likelihood of the response given a subset of snippets, needs one LLM forward pass per evaluated subset and depends on the order of the snippets in the prompt. We propose to measure the value of a subset of snippets \emph{geometrically}, by how well their representations explain the representation of the response. We introduce three value functions on Gram matrices, the volume difference, the log-volume and the spectral entropy. We obtain them from an external text encoder (EATT), from the attention matrix of the LLM itself (GATT), and, by extending the value functions from vectors to subspaces, from the value vectors that the attention actually moves into the response (VATT). The latter two need only the generation pass and one prompt-only pass, regardless of the number of snippets. On multi-hop question answering with Gemma~4 31B and exact Shapley values as reference, VATT reaches a Pearson correlation of $0.91$ with exact likelihood Shapley values, matching KernelSHAP with $23$ LLM passes, and identifies the ground-truth supporting facts better than the exact reference itself (AUROC $0.93$ vs.\ $0.91$), while gradient-based attribution of the same likelihood performs at chance level. The results carry over to benchmarks with up to $20$ snippets, to summarization and to redundant evidence, where the geometric attributions split the credit between duplicated snippets and leave-one-out does not.
+\end{abstract}
+
+\section{Introduction}
+\label{sec:introduction}
+
+A retrieval-augmented LLM answers a question from a set of retrieved snippets. To verify the answer, detect hallucinations, or compensate the providers of the content, we need to know which snippets the answer relies on, and how much it relies on them at all. This is hard for two reasons. First, transformers combine their inputs in non-linear and non-additive ways: snippets can be redundant, complementary or contradictory, and the likelihood of the response depends on their order and position in the prompt~\cite{liu2024lost}. Second, a response never depends on the context alone. It also draws on the parametric knowledge stored in the weights of the model, which may corroborate, bias or override the snippets. Tracing this knowledge back to pre-training documents (\emph{training data attribution}~\cite{koh2017understanding}) is intractable at inference time and is not what verification requires. We therefore attribute to the context only, but we account for the model explicitly: an attribution reports a \emph{model share}, the part of the response that the prior of the model sustains on its own, and distributes the remaining \emph{context share} among the snippets, so that the total credit is conserved (Eq.~\eqref{eq:model_contribution}).
+
+Distributing the context share is a cooperative game among the snippets, and the Shapley value~\cite{shapley1953value} is its canonical solution. Existing Shapley-based attribution defines the value of a coalition of snippets as the log-likelihood of the response given that coalition~\cite{nematov2025source}. This has two drawbacks. It needs one LLM forward pass for every evaluated coalition, $2^n$ for exact values with $n$ snippets, which forces practitioners to resort to sampling and surrogate models~\cite{lundberg2017unified, cohen2024contextcite}. And because the likelihood depends on the order of the snippets, it is not a genuine set function, so the Shapley axioms lose their meaning.
+
+We take a different route and measure the value of a coalition \emph{geometrically}: by how well the representations of its snippets explain the representation of the response. The value then depends only on a Gram matrix of inner products, which makes it permutation invariant by construction and moves the combinatorial work from the accelerator to small linear-algebra problems. The remaining question is where the representations come from, and this turns out to be the decisive design choice. We study three answers: an external text encoder, the attention routing of the LLM, and the value vectors that the attention moves from the snippets into the response.
+
+\paragraph{Contributions.}
+\begin{itemize}
+    \item \textbf{Attribution with an explicit model share.} We formalize context attribution as a cooperative game over the snippets, combined with a global context weight and a \emph{link function} that maps Shapley values to contributions. We characterize which Shapley properties each link preserves: no simplex-valued link is both faithful and additive, and every normalized rule loses strong monotonicity, but for monotone value functions all faithful links coincide and preserve every other property. We also introduce a floor-shifted link that removes the common offset that geometric games assign to all snippets.
+    \item \textbf{Geometric value functions.} We introduce three value functions on the Gram matrix of snippets and response: the volume difference, the log-volume difference and the spectral entropy. We derive their closed-form marginal gains and show that the log-volume is monotone, so that all its Shapley values are non-negative, and that it equals the mutual information between snippets and response in a Gaussian channel. Under a geometric likelihood-ratio condition, it reproduces the likelihood-based attributions exactly, with an error bounded by the deviation from that condition. Applied to an external encoder, these value functions give \textbf{EATT}.
+    \item \textbf{Attention-Gram attribution (GATT).} We build the Gram matrix from the LLM itself, using the queries, keys and causal pre-softmax logits of its global attention layers. We show why symmetrizing the attention matrix is inappropriate for causal decoders and propose two constructions that use only unmasked logits: a role-aligned query--key Gram (RCB) and a thresholded routing-profile Gram (TCR). Attribution needs two forward passes, regardless of the number of snippets.
+    \item \textbf{Set-valued games and value-subspace attribution (VATT).} We extend the value functions from single vectors to sets of vectors, i.e., to subspaces, through principal angles, and prove that monotonicity, boundedness and the Gaussian interpretation carry over and that sets never explain less than pooled vectors. Representing every snippet by the subspace of its value vectors and the response by what it reads from the context gives VATT, an attribution that is self-normalized and reduces to value-weighted attention norms when snippets are orthogonal, but splits the credit of redundant snippets instead of counting it twice.
+    \item \textbf{Experiments.} On $200$ HotpotQA questions answered by Gemma~4 31B, we compare all methods with exact $2^n$ likelihood Shapley values ($64$ forward passes per instance) and with ground-truth supporting facts. The source of the geometry matters most: EATT and GATT reach a Pearson correlation of $0.72$--$0.78$ with the exact values, whereas VATT reaches $0.91$ with half their error, matches KernelSHAP with $23$ LLM passes, and identifies the supporting facts better than every ablation baseline and the exact reference itself (AUROC $0.93$ vs.\ $0.91$), all with two LLM passes. The conclusions carry over to 2WikiMultihopQA, to MuSiQue with $20$ snippets, where fixed-budget ablation surrogates degrade while VATT keeps a correlation of $0.94$ with two passes, and to CNN/DailyMail summarization; with duplicated or paraphrased evidence, the Shapley-based attributions split the credit between the copies, whereas leave-one-out assigns them almost nothing. The log-volume is the most robust value function, about half of the global attention layers suffice, and gradient-based attribution of the same likelihood performs at chance level because of saturation and off-manifold interpolation.
+\end{itemize}
+
+The rest of the paper is organized as follows. Section~\ref{sec:related_work} reviews related work and Section~\ref{sec:problem_formulation} defines the attribution problem. Section~\ref{sec:coop_game} introduces the cooperative game and the link functions, Section~\ref{subsec:geometric_values} the geometric value functions and EATT, Section~\ref{sec:attention_gram_attribution} GATT, and Section~\ref{sec:set_embeddings} the set-valued games and VATT. Section~\ref{sec:experiments} reports the experiments, and Section~\ref{sec:conclusions} concludes.
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+% \section{Related Work}
+
+% The challenge of attributing Large Language Model (LLM) generation to source context within Retrieval-Augmented Generation (RAG) systems has sparked a line of research in perturbation-based post-hoc explanations. 
+% The canonical baseline, which we refer to as the log-likelihood Easton algorithm, was formalized by Nematov et al.~\cite{nematov2025source}. This approach frames source attribution as an $n$-player cooperative game, where the utility of a document subset $S'$ is evaluated using the conditional output log-likelihood $\log P(r \mid q, S')$ under teacher forcing~\cite{nematov2025source}. 
+% While theoretically elegant, exact evaluation remains computationally intractable due to the $\mathcal{O}(2^n)$ LLM forward passes, forcing practitioners to rely on linear surrogate approximations such as KernelSHAP~\cite{lundberg2017unified} or ContextCite~\cite{cohen2024contextcite}. 
+% Furthermore, these likelihood-based methods are severely distorted by sequential position bias (e.g., the ``lost in the middle'' phenomenon) and token-length artifacts~\cite{nematov2025source}.
+
+% In parallel, another line of research has leveraged spectral algebra to evaluate the representational diversity of continuous embeddings. 
+% Notably, the Vendi Score~\cite{friedman2022vendi} defines semantic diversity as the von Neumann spectral entropy of a normalized Gram similarity matrix, a formulation recently expanded to dataset valuation and scaling dynamics~\cite{bilmes2026dataset}. 
+% Our proposed framework, \textbf{GATT}, bridges these previously disjoint paradigms. 
+% By mapping both context snippets and responses into a continuous, order-invariant vector space (or directly utilizing the pre-softmax attention Gram matrices of the Transformer), we replace the expensive, sequence-dependent probability evaluations of Nematov et al.~\cite{nematov2025source} with exact, closed-form geometric volume updates. 
+% This formulation not only reduces the combinatorial bottleneck from days of GPU compute to milliseconds of CPU algebra, but it also mathematically guarantees position-invariance and provides a rigorous spectral entropy-based formulation for multi-dimensional context attribution.
+
+\section{Related Work}
+\label{sec:related_work}
+
+\paragraph{Perturbation-based and Shapley attribution.}
+The most principled line of work measures the influence of context by ablating it. Leave-one-out (LOO) scores measure the change in the response likelihood when a single snippet is removed. AttriBoT~\cite{liu2025attribot} speeds up LOO with cached activations, hierarchical attribution and smaller proxy models. LOO ignores interactions, however: it gives zero credit to both copies of a duplicated snippet. Shapley values~\cite{shapley1953value} account for interactions by averaging marginal contributions over all coalitions. Nematov et al.~\cite{nematov2025source} cast document-level RAG attribution as a cooperative game whose value is the teacher-forced log-likelihood $\log P(r \mid p, S')$. They also separate the context share from the model's parametric prior through a global weight. Exact evaluation needs one LLM forward pass per coalition, so in practice one uses permutation sampling~\cite{castro2009polynomial}, KernelSHAP~\cite{lundberg2017unified}, or sparse linear surrogates fitted on random ablations, as in ContextCite~\cite{cohen2024contextcite}. TracLLM~\cite{wang2025tracllm} extends these estimators to long contexts with informed search and score ensembling. All of these methods evaluate the value function through the LLM, so their cost grows with the number of evaluated coalitions. Moreover, the likelihood of a coalition depends on the order of its snippets in the prompt~\cite{liu2024lost}, so it is not a genuine set function. Shapley values are also standard in data valuation, where a coalition is a subset of the training data~\cite{ghorbani2019data, kwon2022beta}.
+
+\paragraph{Gradient-based attribution.}
+Gradient methods score input tokens by backpropagating from the output, e.g., saliency maps~\cite{simonyan2014deep} and Integrated Gradients~\cite{sundararajan2017axiomatic}. Integrated Gradients satisfies a completeness axiom analogous to Shapley efficiency. These methods require a backward pass per output (or per path step), white-box access, and the choice of a baseline input. They also produce token-level scores, and aggregating these into document-level credit is not canonical~\cite{nematov2025source}.
+
+\paragraph{Attention-based attribution.}
+Attention-based methods read importance off the attention weights obtained during generation, e.g., by aggregating the attention of response tokens to the tokens of each document. They are cheap, since the weights are a by-product of the forward pass. Whether attention weights explain model behavior is debated, however~\cite{jain2019attention, wiegreffe2019attention}. They must be aggregated across layers and heads~\cite{abnar2020quantifying}, and they are distorted by sink tokens that absorb attention irrespective of content~\cite{xiao2024efficient}. Most importantly, they are heuristics without an axiomatic notion of credit: redundant or complementary snippets are scored independently of each other.
+
+\paragraph{Geometric measures of diversity.}
+A separate line of work quantifies the diversity of a set of embeddings through the spectrum of their Gram matrix. Determinantal point processes assign probabilities proportional to Gram determinants, i.e., squared volumes~\cite{kulesza2012determinantal}. The Vendi score defines diversity as the exponentiated von Neumann entropy of the normalized Gram matrix~\cite{friedman2022vendi}. Bilmes et al.~\cite{bilmes2026dataset} relate it to submodular matrix spectral functions and to dataset valuation. These measures have been used to select and value sets, but not to attribute a generated response to its sources.
+
+\paragraph{Our approach in context.}
+We keep the axiomatic foundation of Shapley-based attribution and the explicit model share of~\cite{nematov2025source}, but change how a coalition is valued. In EATT, the value of a coalition is a geometric function of the Gram matrix of snippet and response embeddings: volume difference, log-volume difference, or spectral entropy. This connects Shapley attribution to the geometric diversity measures above, and it makes the value function permutation invariant by construction. It also moves the combinatorial computation from the LLM to inexpensive linear algebra. The log-volume value function reproduces the likelihood-based attributions under a geometric likelihood-ratio condition. In GATT, the Gram matrix is built from the causal pre-softmax queries, keys and logits of the LLM itself. This retains the efficiency of attention-based methods (two forward passes, regardless of the number of snippets). Unlike these heuristics, it distributes credit through a cooperative game, so redundant snippets share credit and complementary snippets are both credited.
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+
+\section{Attribution Problem}
+\label{sec:problem_formulation}
+
+For any integer $n \ge 1$, we define $[n] := \{1, \dots, n\}$ and denote its power set by $2^{[n]}$. Let $\mathcal{V}^*$ represent the set of all finite token sequences over a vocabulary $\mathcal{V}$. An instance of the \textbf{source attribution problem} is defined by the tuple $(p, S, r)$, where $p \in \mathcal{V}^*$ is the input prompt (encoding instructions and user query $q$), $S = (s_1, \dots, s_n) \in (\mathcal{V}^*)^n$ is an ordered sequence of $n$ retrieved context snippets, and $r \in \mathcal{V}^*$ is the response generated by a conditional language model $P(\cdot \mid p, S)$. By slight abuse of notation, for any index subset $S' \subseteq [n]$, we let $S'$ denote both the index set and its corresponding sub-collection of snippets $\{s_i\}_{i \in S'}$.
+
+A response is generally produced by combining two sources of information: the external evidence in $S$ and the parametric knowledge stored in the weights of the model. An attribution algorithm therefore has to report a share for each snippet and also a share for the model itself.
+
+\begin{definition}[Attribution algorithm]\label{def:attribution_algorithm}
+An \textbf{attribution algorithm} $\mathcal{A}$ maps an instance $(p, S, r)$, together with (oracle) access to the language model $P$, to a pair
+\begin{align}
+    \mathcal{A}(p, S, r; P) = \big(\alpha_{\text{model}}, \boldsymbol{\alpha}\big), \qquad \alpha_{\text{model}} \in [0, 1], \quad \boldsymbol{\alpha} = (\alpha_1, \dots, \alpha_n)^\top \in \mathbb{R}^n_{\ge 0},
+\end{align}
+where $\alpha_i$ is the contribution assigned to snippet $s_i$ and $\alpha_{\text{model}}$ is the contribution assigned to the parametric knowledge of the model. The output is required to conserve the total credit:
+\begin{align}\label{eq:model_contribution}
+    \alpha_{\text{model}} + \sum_{i=1}^n \alpha_i = 1 \quad \Longleftrightarrow \quad \sum_{i=1}^n \alpha_i = w := 1 - \alpha_{\text{model}} .
+\end{align}
+\end{definition}
+
+The snippet contributions therefore need not add up to one: they add up to the \emph{global context weight} $w \in [0,1]$, which measures how much of the response is explained by the retrieved context as opposed to the prior of the model. In the extreme case $w = 0$, the response is fully explained by parametric knowledge and no snippet receives any credit; if $w = 1$, the full credit goes to the context. Throughout, we follow a two-stage design: the global weight $w$ is estimated first (see Section~\ref{sec:llh_shapley}), and the context share $w$ is then distributed among the snippets.
+
+Furthermore, we made an other implicit modeling decision by not allowing negative contribution. There might be snippets which have adversarial contribution, e.g. factually incorrect, in which case negative contribution might be justified to use. However, in our setting, we require the contribution to be zero in that case.
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+\section{Cooperative Game Formulation of the Attribution Problem}
+\label{sec:coop_game}
+
+We model the distribution of the context share $w$ as a cooperative game $([n], v)$ with a value function $v: 2^{[n]} \to \mathbb{R}$, $v(\emptyset) = 0$, where $v(S')$ quantifies how well the sub-collection $S'$ explains the response $r$. Larger values of $v$ mean that the response is better explained. The marginal contribution of snippet $i$ to a coalition $S' \subseteq [n] \setminus \{i\}$ is $\Delta v(S', i) := v(S' \cup \{i\}) - v(S')$, and the Shapley value~\cite{shapley1953value} of snippet $i$ is
+\begin{align}\label{eq:shapley_def}
+    \phi_i(v) := \sum_{S' \subseteq [n] \setminus \{i\}} \frac{|S'|!\,(n - |S'| - 1)!}{n!} \, \Delta v(S', i).
+\end{align}
+Equivalently, $\phi_i(v)$ is the expected marginal contribution of snippet $i$ when the snippets arrive in a uniformly random order. We write $\boldsymbol{\phi}(v) := (\phi_1(v), \dots, \phi_n(v))^\top$.
+
+\paragraph{Why Shapley values?}
+The Shapley value is the unique allocation rule satisfying the following four axioms~\cite{shapley1953value}. Each of them is a natural requirement on source attribution.
+\begin{itemize}
+    \item \textbf{Efficiency:} $\sum_{i=1}^n \phi_i(v) = v([n])$. The utility of the full context is distributed among the snippets, without loss and without double counting.
+    \item \textbf{Symmetry:} if $v(S' \cup \{i\}) = v(S' \cup \{j\})$ for all $S' \subseteq [n] \setminus \{i,j\}$, then $\phi_i(v) = \phi_j(v)$. Interchangeable snippets, e.g., duplicates, receive equal credit.
+    \item \textbf{Null player:} if $\Delta v(S', i) = 0$ for all $S' \subseteq [n] \setminus \{i\}$, then $\phi_i(v) = 0$. Irrelevant snippets receive no credit.
+    \item \textbf{Linearity:} $\boldsymbol{\phi}(a u + b v) = a\, \boldsymbol{\phi}(u) + b\, \boldsymbol{\phi}(v)$ for all games $u, v$ and $a, b \in \mathbb{R}$. Attributions computed on components of the value function, e.g., response segments or attention heads, add up to the attribution of the aggregated value function, and rescaling $v$ rescales $\boldsymbol{\phi}$.
+\end{itemize}
+Two further properties follow from these axioms. The first is an \emph{ordering} property: a snippet that is at least as useful as another one in every context receives at least as much credit.
+
+\begin{lemma}[Desirability]\label{lem:desirability}
+For all $i \neq j$,
+\begin{align}
+    \phi_i(v) - \phi_j(v) = \sum_{S' \subseteq [n] \setminus \{i,j\}} \frac{|S'|!\,(n - |S'| - 2)!}{(n-1)!} \big( v(S' \cup \{i\}) - v(S' \cup \{j\}) \big).
+\end{align}
+In particular, if $v(S' \cup \{i\}) \ge v(S' \cup \{j\})$ for all $S' \subseteq [n] \setminus \{i,j\}$, then $\phi_i(v) \ge \phi_j(v)$.
+\end{lemma}
+
+\begin{proof}
+Let $\gamma(s) := s!(n-s-1)!/n!$. In~\eqref{eq:shapley_def} for $\phi_i$, write each coalition as $S'$ or $S' \cup \{j\}$ with $S' \subseteq [n] \setminus \{i,j\}$, and do the same for $\phi_j$. In the difference, the terms $v(S')$ and $v(S' \cup \{i,j\})$ cancel, leaving $\big(\gamma(|S'|) + \gamma(|S'|+1)\big)\big(v(S' \cup \{i\}) - v(S' \cup \{j\})\big)$. Finally, $\gamma(s) + \gamma(s+1) = \frac{s!(n-s-2)!}{n!}\big((n-s-1) + (s+1)\big) = \frac{s!(n-s-2)!}{(n-1)!}$.
+\end{proof}
+
+The second is \emph{strong monotonicity}~\cite{young1985monotonic}: if $\Delta u(S', i) \ge \Delta v(S', i)$ for all $S'$, then $\phi_i(u) \ge \phi_i(v)$, i.e., a snippet's credit depends only on its own marginal contributions. By~\eqref{eq:shapley_def}, this holds trivially. Young~\cite{young1985monotonic} showed that efficiency, symmetry and strong monotonicity characterize the Shapley value as well.
+
+Beyond the axioms, averaging over all arrival orders accounts for \emph{interactions} between snippets. Redundant snippets (substitutes) split the credit. Leave-one-out scores, by contrast, assign zero credit to both copies of a duplicated snippet. Snippets that are only jointly informative (complements, e.g., distributed evidence) are both credited, whereas single-snippet scores miss their synergy. The Shapley value only requires oracle access to $v$, so the same machinery applies to the likelihood-based value function of Section~\ref{subsec:logvol_to_llh} and to the geometric value functions of Section~\ref{subsec:geometric_values}. The axioms are, however, only meaningful if $v$ is a genuine set function, i.e., if $v(S')$ does not depend on the order in which the snippets of $S'$ are presented. Likelihood-based value functions violate this requirement; embedding-based value functions satisfy it by construction.
+
+\subsection{Link Functions}
+\label{subsec:link_functions}
+
+The Shapley vector $\boldsymbol{\phi}(v)$ is measured in the units of $v$, and its entries may be negative, e.g., when a snippet contradicts the response. To obtain contributions that satisfy the credit conservation~\eqref{eq:model_contribution}, we map it to a vector whose entries sum to one. Let $\mathbf{1}$ be the all-ones vector, $x^+ := \max(0, x)$ (entrywise for vectors),
+\begin{align*}
+    \mathcal{A}^{n-1} := \{\mathbf{a} \in \mathbb{R}^n : \mathbf{1}^\top \mathbf{a} = 1\} \qquad \text{and} \qquad \Delta^{n-1} := \mathcal{A}^{n-1} \cap \mathbb{R}^n_{\ge 0}
+\end{align*}
+the affine hull of the probability simplex and the simplex itself.
+
+\begin{definition}[Link function]\label{def:link}
+A \textbf{link function} is a map $g: \mathcal{D}_g \to \mathcal{A}^{n-1}$ on a domain $\mathcal{D}_g \subseteq \mathbb{R}^n$. It is \emph{simplex-valued} if $g(\mathcal{D}_g) \subseteq \Delta^{n-1}$. Given a global context weight $w \in [0,1]$, the contributions are
+\begin{align}\label{eq:link}
+    \boldsymbol{\alpha} := w \cdot g\big(\boldsymbol{\phi}(v)\big), \qquad \alpha_{\text{model}} := 1 - w,
+\end{align}
+which satisfy~\eqref{eq:model_contribution} by construction. If $\boldsymbol{\phi}(v) \notin \mathcal{D}_g$, i.e., no snippet carries positive credit, we set $\boldsymbol{\alpha} := \mathbf{0}$ and $\alpha_{\text{model}} := 1$.
+\end{definition}
+
+We consider the following candidates.
+\begin{itemize}
+    \item \textbf{Linear:} $g^{\text{lin}}(\boldsymbol{\phi}) := \boldsymbol{\phi} / \mathbf{1}^\top \boldsymbol{\phi}$ on $\{\mathbf{1}^\top \boldsymbol{\phi} > 0\}$. By Efficiency, this is the efficient normalization $\phi_i(v) / v([n])$. Its entries sum to one but may be negative.
+    \item \textbf{Rectified}~\cite{nematov2025source}: $g^{\text{rect}}(\boldsymbol{\phi}) := \boldsymbol{\phi}^+ / \mathbf{1}^\top \boldsymbol{\phi}^+$ on $\{\mathbf{1}^\top \boldsymbol{\phi}^+ > 0\}$. It discards negative credit and preserves the \emph{ratios} between supporting snippets.
+    \item \textbf{Sparsemax}~\cite{martins2016softmax}: $g^{\text{sp}}(\boldsymbol{\phi}) := \operatorname{Proj}_{\Delta^{n-1}}\big(\boldsymbol{\phi} / \mathbf{1}^\top \boldsymbol{\phi}\big)$ on $\{\mathbf{1}^\top \boldsymbol{\phi} > 0\}$, the Euclidean projection of the efficient normalization onto the simplex. It has the closed form $g^{\text{sp}}_i = (x_i - \tau)^+$ with $\mathbf{x} := \boldsymbol{\phi}/\mathbf{1}^\top\boldsymbol{\phi}$ and $\tau \ge 0$ the solution of $\sum_i (x_i - \tau)^+ = 1$. It charges the negative credit uniformly to the supporting snippets and preserves their \emph{differences}.
+    \item \textbf{Power:} $g^{\gamma}_i(\boldsymbol{\phi}) := (\phi_i^+)^\gamma / \sum_j (\phi_j^+)^\gamma$ for $\gamma > 0$. It recovers $g^{\text{rect}}$ for $\gamma = 1$, sharpens for $\gamma > 1$, and flattens for $\gamma < 1$.
+    \item \textbf{Softmax:} $g^{\text{soft}}_i(\boldsymbol{\phi}) := e^{\phi_i/\tau} / \sum_j e^{\phi_j/\tau}$ with temperature $\tau > 0$, defined on all of $\mathbb{R}^n$.
+    \item \textbf{Absolute:} $g^{\text{abs}}(\boldsymbol{\phi}) := |\boldsymbol{\phi}| / \mathbf{1}^\top |\boldsymbol{\phi}|$. It measures \emph{influence} rather than \emph{support}.
+\end{itemize}
+\begin{definition}[Floor-shifted power link]\label{def:floor_link}
+For $\gamma > 0$ and $\phi_{\min} := \min_j \phi_j$, let $g^{\text{fl},\gamma}_i(\boldsymbol{\phi}) := (\phi_i - \phi_{\min})^\gamma / \sum_j (\phi_j - \phi_{\min})^\gamma$, with $g^{\text{fl},\gamma}(\boldsymbol{\phi}) := \mathbf{1}/n$ if all entries are equal. It removes a common offset before normalizing (Section~\ref{subsec:contrast_calibration}).
+\end{definition}
+
+\begin{example}[Seven links on the same Shapley vector]\label{ex:links}
+Let $n = 4$ and $\boldsymbol{\phi} = (3, 1, -1, 0)^\top$: snippet~1 strongly supports the response, snippet~2 weakly supports it, snippet~3 contradicts it, and snippet~4 is irrelevant (a null player). Table~\ref{tab:link_example} lists the resulting shares. The links agree on the ranking of the two supporting snippets but differ in three respects: whether the contradicting snippet receives credit (softmax, absolute), whether the irrelevant snippet receives credit (softmax, floor-shifted), and how the credit is split between the supporting snippets.
+\end{example}
+
+\begin{table}[h]
+\centering
+\small
+\begin{tabular}{lcccc}
+\hline
+\textbf{Link} & $s_1$ (strong) & $s_2$ (weak) & $s_3$ (contradicts) & $s_4$ (irrelevant) \\ \hline
+Linear                       & $1.000$ & $0.333$ & $-0.333$ & $0$ \\
+Rectified                    & $0.750$ & $0.250$ & $0$      & $0$ \\
+Sparsemax                    & $0.833$ & $0.167$ & $0$      & $0$ \\
+Power ($\gamma = 2$)         & $0.900$ & $0.100$ & $0$      & $0$ \\
+Softmax ($\tau = 1$)         & $0.831$ & $0.112$ & $0.015$  & $0.041$ \\
+Absolute                     & $0.600$ & $0.200$ & $0.200$  & $0$ \\
+Floor-shifted ($\gamma = 1$) & $0.571$ & $0.286$ & $0$      & $0.143$ \\ \hline
+\end{tabular}
+\caption{Shares assigned by each link to $\boldsymbol{\phi} = (3, 1, -1, 0)^\top$ (Example~\ref{ex:links}).}
+\label{tab:link_example}
+\end{table}
+
+\subsection{Which Shapley Properties Survive the Link?}
+\label{subsec:link_axioms}
+
+A link function defines a new allocation rule on games,
+\begin{align}
+    \psi_g(v) := g\big(\boldsymbol{\phi}(v)\big) \in \mathcal{A}^{n-1},
+\end{align}
+and the contributions are $\boldsymbol{\alpha} = w\, \psi_g(v)$. The global weight only rescales, so we study $\psi_g$. Since $\psi_g$ always sums to one, it cannot satisfy the Shapley axioms literally; instead, we ask whether it satisfies their \emph{normalized analogues}. We go through the axioms one at a time and state, for each, (a) the normalized analogue, (b) a condition on $g$ that guarantees it, and (c) which links satisfy it. Table~\ref{tab:link_axioms} summarizes the results.
+
+\paragraph{Efficiency $\to$ Faithfulness.}
+After normalization, every link sums to one, so efficiency in its literal form is automatic. The meaningful analogue is that shares are \emph{proportional} to the Shapley values, i.e., $\psi_{g,i}(v) = \phi_i(v) / v([n])$, the efficient normalization. We call $g$ \emph{faithful} if $g(\boldsymbol{\phi}) = \boldsymbol{\phi} / \mathbf{1}^\top \boldsymbol{\phi}$ for every $\boldsymbol{\phi} \in \mathbb{R}^n_{\ge 0} \setminus \{\mathbf{0}\}$, i.e., the link does not distort a Shapley vector that is already a valid credit vector.
+\begin{itemize}
+    \item The \textbf{linear} link equals the efficient normalization for every Shapley vector, at the price of possibly negative shares.
+    \item The \textbf{rectified}, \textbf{sparsemax} and \textbf{absolute} links are faithful: they coincide with the linear link on non-negative vectors and differ only in how they treat negative entries.
+    \item The \textbf{power} ($\gamma \neq 1$), \textbf{softmax} and \textbf{floor-shifted} links are not faithful. In Table~\ref{tab:link_example}, removing $s_3$ would make the Shapley vector $(3, 1, 0)$, which the faithful links map to $(0.75, 0.25, 0)$, while these links do not.
+\end{itemize}
+
+\paragraph{Symmetry $\to$ Permutation equivariance.}
+The analogue is: interchangeable snippets receive equal shares. It holds whenever $g$ is permutation equivariant, $g(\sigma \boldsymbol{\phi}) = \sigma g(\boldsymbol{\phi})$ for every permutation $\sigma$. \textbf{All} candidate links satisfy this.
+
+\paragraph{Null player $\to$ Zero in, zero out.}
+The analogue is: a null player receives zero share. It holds whenever $\phi_i = 0 \Rightarrow g_i(\boldsymbol{\phi}) = 0$.
+\begin{itemize}
+    \item Satisfied by the linear, rectified, sparsemax (since $\tau \ge 0$), power and absolute links.
+    \item Violated by the \textbf{softmax} link, which gives every snippet a positive share, and by the \textbf{floor-shifted} link, which gives a null player a positive share whenever some snippet has a negative Shapley value ($s_4$ in Table~\ref{tab:link_example}).
+\end{itemize}
+A stronger requirement is \emph{sign consistency}, $\phi_i \le 0 \Rightarrow g_i(\boldsymbol{\phi}) = 0$: contradicting snippets also receive no credit. It holds for the rectified, sparsemax and power links. It fails for the linear link (negative shares), for the softmax and absolute links (positive shares), and for the floor-shifted link.
+
+\paragraph{Linearity $\to$ Scale invariance and aggregation consistency.}
+Linearity has two parts with different fates.
+\begin{itemize}
+    \item \textbf{Homogeneity}, $\boldsymbol{\phi}(cv) = c\, \boldsymbol{\phi}(v)$, has the analogue $\psi_g(cv) = \psi_g(v)$ for $c > 0$: shares do not depend on the units of $v$ (nats vs.\ bits, or a rescaled embedding geometry). It holds whenever $g(c\boldsymbol{\phi}) = g(\boldsymbol{\phi})$. All links except \textbf{softmax} satisfy this; for softmax, the temperature $\tau$ is measured in the units of $v$.
+    \item \textbf{Additivity}, $\boldsymbol{\phi}(u + v) = \boldsymbol{\phi}(u) + \boldsymbol{\phi}(v)$, has the analogue of \emph{aggregation consistency}: for games with $u([n]), v([n]) > 0$,
+    \begin{align}\label{eq:aggregation}
+        \psi_g(u + v) = \frac{u([n])\, \psi_g(u) + v([n])\, \psi_g(v)}{u([n]) + v([n])},
+    \end{align}
+    i.e., shares computed on components combine into the shares of the aggregated game as a value-weighted average. The linear link satisfies~\eqref{eq:aggregation}, since $\mathbf{1}^\top \boldsymbol{\phi}(u) = u([n])$ by Efficiency. No simplex-valued link can do so in general.
+\end{itemize}
+
+\begin{proposition}[Additivity and non-negativity are incompatible]\label{prop:link_impossibility}
+Let $n \ge 2$. No simplex-valued link function is both faithful and aggregation consistent on all games with positive total value.
+\end{proposition}
+
+\begin{proof}
+Take $\boldsymbol{\phi} \in \mathbb{R}^n$ with $t := \mathbf{1}^\top \boldsymbol{\phi} > 0$ and $\phi_1 < 0$, e.g., $\boldsymbol{\phi} = (-1, 2, 0, \dots, 0)^\top$. The additive game $u(S') := \sum_{i \in S'} \phi_i$ has $\boldsymbol{\phi}(u) = \boldsymbol{\phi}$ and $u([n]) = t$. The game $c(S') := \lambda |S'|$ with $\lambda \ge |\phi_1|$ has $\boldsymbol{\phi}(c) = \lambda \mathbf{1}$ and $c([n]) = n\lambda$, and $u + c$ has the non-negative Shapley vector $\boldsymbol{\phi} + \lambda \mathbf{1}$. By faithfulness, $\psi_g(u + c) = (\boldsymbol{\phi} + \lambda \mathbf{1})/(t + n\lambda)$ and $\psi_g(c) = \mathbf{1}/n$. Substituting into~\eqref{eq:aggregation} gives $\boldsymbol{\phi} + \lambda\mathbf{1} = t\, \psi_g(u) + \lambda \mathbf{1}$, i.e., $\psi_g(u) = \boldsymbol{\phi}/t$, whose first entry is negative. This contradicts $\psi_g(u) \in \Delta^{n-1}$.
+\end{proof}
+
+Faithful simplex-valued links (rectified, sparsemax, absolute) satisfy~\eqref{eq:aggregation} only when all Shapley vectors involved are non-negative, where they coincide with the linear link. Non-faithful links (power, softmax, floor-shifted) violate it even then.
+
+\paragraph{Desirability $\to$ Order preservation.}
+The analogue of Lemma~\ref{lem:desirability} is: a snippet that is at least as useful as another one in every context receives at least as large a share. It holds whenever $g$ is order preserving, $\phi_i \ge \phi_j \Rightarrow g_i(\boldsymbol{\phi}) \ge g_j(\boldsymbol{\phi})$. All candidates are order preserving except the \textbf{absolute} link, which can rank a contradicting snippet above a supporting one: $(-3, 1, 1)^\top \mapsto (0.6, 0.2, 0.2)^\top$.
+
+\begin{proposition}[Transfer of axioms]\label{prop:axiom_transfer}
+Let $g$ be a link function. If $g$ is permutation equivariant, then $\psi_g$ satisfies the normalized Symmetry axiom. If $g$ maps zero entries to zero, then $\psi_g$ satisfies the Null player axiom. If $g$ is order preserving, then $\psi_g$ satisfies Desirability.
+\end{proposition}
+
+\begin{proof}
+If $i$ and $j$ are interchangeable, then $\phi_i(v) = \phi_j(v)$ by Symmetry, so the transposition $\sigma = (i\,j)$ fixes $\boldsymbol{\phi}(v)$, and equivariance gives $g(\boldsymbol{\phi}) = \sigma g(\boldsymbol{\phi})$, i.e., $g_i = g_j$. If $i$ is a null player, then $\phi_i(v) = 0$ by the Null player axiom. If $v(S' \cup \{i\}) \ge v(S' \cup \{j\})$ for all $S'$, then $\phi_i(v) \ge \phi_j(v)$ by Lemma~\ref{lem:desirability}.
+\end{proof}
+
+\paragraph{Strong monotonicity is lost by every link.}
+Shares are relative quantities, so a snippet's share can decrease although its own marginal contributions are unchanged, simply because another snippet became more useful.
+
+\begin{proposition}[Normalization destroys strong monotonicity]\label{prop:no_strong_monotonicity}
+Let $n \ge 2$, and let $g$ be permutation equivariant with $g_2(\boldsymbol{\phi}) > g_1(\boldsymbol{\phi})$ for $\boldsymbol{\phi} = (1, 3, 1, \dots, 1)^\top$. Then $\psi_g$ violates strong monotonicity. In particular, all candidate links violate it.
+\end{proposition}
+
+\begin{proof}
+Let $u(S') := |S'|$, and let $v(S') := |S'| + 2$ if $2 \in S'$ and $v(S') := |S'|$ otherwise. Both games are additive, with $\boldsymbol{\phi}(u) = \mathbf{1}$ and $\boldsymbol{\phi}(v) = (1, 3, 1, \dots, 1)^\top$, and snippet~1 has the same marginal contributions in both: $\Delta u(S', 1) = \Delta v(S', 1) = 1$. Strong monotonicity therefore requires $\psi_{g,1}(u) = \psi_{g,1}(v)$. By equivariance, $\psi_{g,1}(u) = 1/n$, and the entries $1, 3, \dots, n$ of $\psi_g(v)$ are equal. Since they sum to one with $\psi_{g,2}(v)$ and $\psi_{g,2}(v) > \psi_{g,1}(v)$, we get $\psi_{g,1}(v) < 1/n$. Every candidate favors the larger entry of $(1, 3, 1, \dots, 1)^\top$.
+\end{proof}
+
+Since efficiency, symmetry and strong monotonicity characterize the Shapley value~\cite{young1985monotonic}, no normalized attribution rule, including the algorithm of~\cite{nematov2025source}, is a Shapley value in the axiomatic sense. This is a consequence of normalization itself, not of a particular link.
+
+\begin{table}[h]
+\centering
+\small
+\begin{tabular}{lcccccccc}
+\hline
+ & & \textbf{Efficiency} & \textbf{Symmetry} & \textbf{Null} & \multicolumn{2}{c}{\textbf{Linearity}} & & \\
+\textbf{Link} & \textbf{Simplex} & \textbf{(faithful)} & & \textbf{player} & \textbf{scale} & \textbf{aggreg.} & \textbf{Order} & \textbf{Sign} \\ \hline
+Linear                             & $\times$   & \checkmark & \checkmark & \checkmark & \checkmark & \checkmark & \checkmark & $\times$   \\
+Rectified                          & \checkmark & $(\ast)$   & \checkmark & \checkmark & \checkmark & $(\ast)$   & \checkmark & \checkmark \\
+Sparsemax                          & \checkmark & $(\ast)$   & \checkmark & \checkmark & \checkmark & $(\ast)$   & \checkmark & \checkmark \\
+Absolute                           & \checkmark & $(\ast)$   & \checkmark & \checkmark & \checkmark & $(\ast)$   & $\times$   & $\times$   \\
+Power, $\gamma \neq 1$             & \checkmark & $\times$   & \checkmark & \checkmark & \checkmark & $\times$   & \checkmark & \checkmark \\
+Softmax                            & \checkmark & $\times$   & \checkmark & $\times$   & $\times$   & $\times$   & \checkmark & $\times$   \\
+Floor-shifted                      & \checkmark & $\times$   & \checkmark & $\times$   & \checkmark & $\times$   & \checkmark & $\times$   \\ \hline
+\end{tabular}
+\caption{Shapley properties preserved by each link function. $(\ast)$: holds whenever the Shapley vectors involved are non-negative, e.g., for monotone value functions (Theorem~\ref{thm:monotone_links}). Strong monotonicity is violated by every link (Proposition~\ref{prop:no_strong_monotonicity}).}
+\label{tab:link_axioms}
+\end{table}
+
+\paragraph{Monotone value functions remove the trade-off.}
+The entries marked $(\ast)$ in Table~\ref{tab:link_axioms} become unconditional when the Shapley values are non-negative, which is guaranteed by monotonicity of the value function.
+
+\begin{theorem}[Monotone value functions]\label{thm:monotone_links}
+Let $v$ be monotone, i.e., $\Delta v(S', i) \ge 0$ for all $S'$ and $i$, with $v([n]) > 0$. Then $\boldsymbol{\phi}(v) \in \mathbb{R}^n_{\ge 0}$, and every faithful link gives
+\begin{align}
+    \psi_{g,i}(v) = \frac{\phi_i(v)}{v([n])} \qquad (i \in [n]).
+\end{align}
+In particular, the linear, rectified, sparsemax and absolute links coincide, and $\psi_g$ is simplex-valued and satisfies Faithfulness, Symmetry, Null player, scale invariance, Desirability and Sign consistency. Moreover, it satisfies aggregation consistency on the class of monotone games.
+\end{theorem}
+
+\begin{proof}
+Each $\phi_i(v)$ is a convex combination of non-negative marginal gains, so $\boldsymbol{\phi}(v) \ge \mathbf{0}$, and $\mathbf{1}^\top \boldsymbol{\phi}(v) = v([n]) > 0$ by Efficiency. Faithfulness gives the formula, and the listed properties hold for the linear link on non-negative vectors. Sign consistency follows because $\phi_i \le 0$ implies $\phi_i = 0$. Sums of monotone games are monotone, so~\eqref{eq:aggregation} holds by the linear case.
+\end{proof}
+
+The log-volume value function $v_{\text{logvol}}$ of Section~\ref{subsec:geometric_values} is monotone. With $v_{\text{logvol}}$, the choice among faithful links is therefore immaterial, and all Shapley properties survive normalization except strong monotonicity, which no normalized rule can keep.
+
+\begin{remark}[The linear link and the likelihood-based global weight]\label{rem:linear_llh}
+For the log-likelihood value function, the global weight of~\cite{nematov2025source} is itself an efficient normalization. With $L_S := \log P(r \mid p, S)$ and $L_\emptyset := \log P(r \mid p) < 0$, we have $1 - L_S / L_\emptyset = v_{\text{LL}}([n]) / (-L_\emptyset)$. Hence, if $v_{\text{LL}}([n]) > 0$, the linear link yields
+\begin{align}
+    \alpha_i = w \, \frac{\phi_i(v_{\text{LL}})}{v_{\text{LL}}([n])} = \frac{\phi_i(v_{\text{LL}})}{-\log P(r \mid p)},
+\end{align}
+so each snippet receives its Shapley value measured in units of the baseline surprisal of the response, and $\boldsymbol{\alpha}$ is linear in $v_{\text{LL}}$. For geometric value functions, $w$ and $v([n])$ come from different models, and this identity does not hold.
+\end{remark}
+
+\subsection{Which link function should be used then?}
+\begin{enumerate}
+    \item{\bf Non-negativity:}  Prefer a monotone value function such as $v_{\text{logvol}}$. By Theorem~\ref{thm:monotone_links}, any faithful link then keeps all Shapley properties except strong monotonicity.
+    \item{\bf Negativity:} If Shapley values can be negative, use the \textbf{linear} link for diagnostics, since contradicting snippets remain visible as negative credit and it is the only aggregation-consistent link. For simplex-valued contributions, use the \textbf{rectified} link (ratio preserving, compatible with~\cite{nematov2025source}) or the \textbf{sparsemax} link (minimal Euclidean distortion of the efficient normalization). These are the only candidates that are faithful, null-player preserving, order preserving and sign consistent.
+    \item Avoid the \textbf{softmax} link (no null player, unit dependent) and the \textbf{absolute} link (breaks the ordering) for support attribution. Use the \textbf{power} and \textbf{floor-shifted} links only as explicit calibrations, and report results with the rectified link alongside.
+\end{enumerate}
+
+\subsection{Monte Carlo Estimation and Stability}
+\label{subsec:link_stability}
+
+When $\boldsymbol{\phi}(v)$ is estimated by the permutation estimator $\bar{\mathbf{m}}_K$ of Lemma~\ref{lemma:unbiased_estimator}, two further points matter.
+
+\paragraph{Link once, after averaging.}
+All candidate links except the linear one are non-linear, so they do not commute with expectation: in general, $\mathbb{E}_\pi[g(\mathbf{m}^\pi)] \neq g(\mathbb{E}_\pi[\mathbf{m}^\pi]) = g(\boldsymbol{\phi}(v))$. The link must therefore be applied once, to the averaged estimate $\bar{\mathbf{m}}_K$, and not to individual permutation samples. If $g$ is continuous at $\boldsymbol{\phi}(v)$, then $g(\bar{\mathbf{m}}_K) \to g(\boldsymbol{\phi}(v))$ almost surely by the strong law of large numbers and the continuous mapping theorem. For the same reason, and by Proposition~\ref{prop:link_impossibility}, value functions over several components should be aggregated \emph{before} the link is applied.
+
+\paragraph{Error amplification.}
+Consistency does not quantify how much the link amplifies the estimation error. The following addresses this question through smoothness of the link function.
+
+\begin{proposition}[Lipschitz bounds]\label{prop:link_lipschitz}
+Let $\boldsymbol{\phi}, \boldsymbol{\phi}' \in \mathbb{R}^n$.
+\begin{enumerate}
+    \item[(i)] If $\mathbf{1}^\top \boldsymbol{\phi}^+ > 0$ and $\mathbf{1}^\top \boldsymbol{\phi}'^+ > 0$, then $\big\| g^{\text{rect}}(\boldsymbol{\phi}) - g^{\text{rect}}(\boldsymbol{\phi}') \big\|_1 \le 2\, \|\boldsymbol{\phi} - \boldsymbol{\phi}'\|_1 / \mathbf{1}^\top \boldsymbol{\phi}^+$.
+    \item[(ii)] If $T := \mathbf{1}^\top \boldsymbol{\phi} > 0$ and $T' := \mathbf{1}^\top \boldsymbol{\phi}' > 0$, then $\big\| g^{\text{lin}}(\boldsymbol{\phi}) - g^{\text{lin}}(\boldsymbol{\phi}') \big\|_1 \le \big( \|\boldsymbol{\phi} - \boldsymbol{\phi}'\|_1 / T \big) \big( 1 + \|\boldsymbol{\phi}'\|_1 / T' \big)$.
+\end{enumerate}
+\end{proposition}
+
+\begin{proof}
+(i) Let $\mathbf{a} := \boldsymbol{\phi}^+$, $\mathbf{b} := \boldsymbol{\phi}'^+$, $A := \mathbf{1}^\top \mathbf{a}$ and $B := \mathbf{1}^\top \mathbf{b}$. Then $\|\mathbf{a}/A - \mathbf{b}/B\|_1 \le \|\mathbf{a} - \mathbf{b}\|_1 / A + B\, |1/A - 1/B| = (\|\mathbf{a} - \mathbf{b}\|_1 + |B - A|)/A \le 2\|\mathbf{a} - \mathbf{b}\|_1 / A$, and $x \mapsto x^+$ is $1$-Lipschitz. (ii) Write $\boldsymbol{\phi}/T - \boldsymbol{\phi}'/T' = (\boldsymbol{\phi} - \boldsymbol{\phi}')/T + \boldsymbol{\phi}'(T' - T)/(T T')$ and use $|T' - T| \le \|\boldsymbol{\phi} - \boldsymbol{\phi}'\|_1$.
+\end{proof}
+
+Combined with Theorem~\ref{thm:bernstein_shapley}, (i) gives a finite-sample guarantee: if $\|\bar{\mathbf{m}}_K - \boldsymbol{\phi}(v)\|_\infty \le \epsilon$ and $\mathbf{1}^\top \bar{\mathbf{m}}_K^+ > 0$, then $\|g^{\text{rect}}(\bar{\mathbf{m}}_K) - g^{\text{rect}}(\boldsymbol{\phi}(v))\|_1 \le 2n\epsilon / \mathbf{1}^\top \boldsymbol{\phi}(v)^+$. The rectified link is thus stable unless the total positive credit is small. By (ii), the linear link amplifies errors by the factor $\|\boldsymbol{\phi}'\|_1 / T'$, which equals one for non-negative vectors but becomes large when positive and negative Shapley values cancel. The power link with $\gamma < 1$ is not Lipschitz at zero, since $x \mapsto x^\gamma$ has unbounded slope there. The floor-shifted link is discontinuous at vectors with equal entries: for every $\epsilon > 0$, it maps $(\epsilon, 0, \dots, 0)^\top$ to $\mathbf{e}_1$, but $\mathbf{0}$ to $\mathbf{1}/n$.
+
+
+
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\section{Embedding based Attribution Algorithm (EATT)}
+
+\subsection{Embedding Geometry, Subspace Projections, Transformers} 
+
+
+Throughout, we denote vectors in $\mathbb{R}^d$ using lowercase boldface letters (e.g., $\mathbf{m}, \mathbf{r}$), matrices using uppercase boldface letters (e.g., $\mathbf{M}, \mathbf{G}$), and the $d \times d$ identity matrix as $\mathbf{I}_d$. For any vector $\mathbf{x} \in \mathbb{R}^d$, we denote its Euclidean norm as $\|\mathbf{x}\|_2 := \sqrt{\langle \mathbf{x}, \mathbf{x} \rangle}$.
+
+Let $f: \mathcal{V}^* \to \mathbb{R}^d$ be a dense embedding encoder normalized to the unit hypersphere, satisfying $\|f(x)\|_2 = 1$ for all $x \in \mathcal{V}^*$. The embedding vectors of the retrieved snippets and the generated response are denoted by:
+\begin{align}
+    \mathbf{m}_i := f(s_i) \in \mathbb{R}^d \quad (\forall i \in [n]) \qquad \text{and} \qquad \mathbf{r} := f(r) \in \mathbb{R}^d.
+\end{align}
+For any coalition of snippets $S' \subseteq [n]$ of cardinality $k = |S'|$, we define the context embedding matrix $\mathbf{M}_{\{S'\}} \in \mathbb{R}^{d \times k}$ as the matrix whose columns are $\{\mathbf{m}_i\}_{i \in S'}$, and we denote the context subspace by $\mathcal{U}_{\{S'\}} := \operatorname{span}(\{\mathbf{m}_i\}_{i \in S'}) \subseteq \mathbb{R}^d$. The geometric similarity structure of $S'$ is captured by its Gram matrix $\mathbf{G}_{\{S'\}} := \mathbf{M}_{\{S'\}}^\top \mathbf{M}_{\{S'\}} \in \mathbb{R}^{k \times k}$, where $(\mathbf{G}_{\{S'\}})_{ij} = \langle \mathbf{m}_i, \mathbf{m}_j \rangle$. 
+
+The orthogonal projection operator onto the subspace $\mathcal{U}_{\{S'\}}$ is defined as $\mathbf{P}_{\{S'\}} := \mathbf{M}_{\{S'\}} \mathbf{G}_{\{S'\}}^{-1} \mathbf{M}_{\{S'\}}^\top$ (or $\mathbf{P}_{\{S'\}} := \mathbf{M}_{\{S'\}} \mathbf{M}_{\{S'\}}^\dagger$ in the rank-deficient case, where $\dagger$ denotes the Moore-Penrose pseudoinverse). The residual component of the response orthogonal to the context is $\mathbf{r}_{\perp, S'} := (\mathbf{I}_d - \mathbf{P}_{\{S'\}})\mathbf{r}$. The Euclidean orthogonal distance of $\mathbf{r}$ to $\mathcal{U}_{\{S'\}}$ is given by:
+\begin{align}
+    d_{\perp}(\mathbf{r}, \mathcal{U}_{\{S'\}}) := \|(\mathbf{I}_d - \mathbf{P}_{\{S'\}})\mathbf{r}\|_2 \in [0, 1],
+\end{align}
+with the boundary condition $d_{\perp}(\mathbf{r}, \mathcal{U}_{\emptyset}) := \|\mathbf{r}\|_2 = 1$.
+
+
+
+\paragraph{Gram Determinant, Volume, and Spectral Trace.}
+The spatial volume of the parallelotope spanned by the context vectors in coalition $S'$ is formally given by the square root of the Gram determinant: $\operatorname{Vol}(\mathbf{M}_{\{S'\}}) := \sqrt{\det(\mathbf{G}_{\{S'\}})}$. Because all embeddings reside on the unit sphere ($\|\mathbf{m}_i\|_2 = 1$), every diagonal entry is identically unity: $(\mathbf{G}_{\{S'\}})_{ii} = 1$. Consequently, the trace of the Gram matrix is strictly fixed to the coalition size: 
+$ \operatorname{Tr}(\mathbf{G}_{\{S'\}}) = \sum_{i} \lambda_i(\mathbf{G}_{\{S'\}}) = |S'|,$
+where $\lambda_i(\mathbf{G}_{\{S'\}}) \ge 0$ denote the eigenvalues. By Hadamard's inequality (equivalently, the AM--GM inequality applied to the spectrum), the determinant is bounded by the product of its diagonal entries:
+\begin{align}
+    \det(\mathbf{G}_{\{S'\}}) = \prod_{i=1}^{|S'|} \lambda_i(\mathbf{G}_{\{S'\}}) \le \prod_{i=1}^{|S'|} (\mathbf{G}_{\{S'\}})_{ii} = 1,
+\end{align}
+with equality holding if and only if the vectors in $S'$ are mutually orthogonal ($\mathbf{G}_{\{S'\}} = \mathbf{I}_{|S'|}$). The log-volume is linked directly to the trace of the matrix logarithm via Jacobi's identity: 
+\begin{align}
+\log \det(\mathbf{G}_{\{S'\}}) = \operatorname{Tr}(\log \mathbf{G}_{\{S'\}})\enspace .
+\end{align} 
+
+\begin{remark}{(Computational stability.)} Whenever the vectors in $S'$ are linearly dependent or contain redundant semantics, $\operatorname{rank}(\mathbf{G}_{\{S'\}}) < |S'|$, causing the determinant to vanish ($\det(\mathbf{G}_{\{S'\}}) = 0$) and the log-volume to diverge to $-\infty$. To guarantee strict positive-definiteness and numerical stability across all coalitions, we apply a Tikhonov (ridge) regularization $\mathbf{G}_{\{S'\}}^{(\lambda)} := \mathbf{G}_{\{S'\}} + \lambda \mathbf{I}_{|S'|}$ for a parameter $\lambda > 0$, ensuring $\det(\mathbf{G}_{\{S'\}}^{(\lambda)}) \ge \lambda^{|S'|} > 0$. Equivalently, by Sylvester's determinant theorem, this dualizes in the ambient feature space to the regularized covariance matrix $\mathbf{A}_{\{S'\}} := \lambda \mathbf{I}_d + \mathbf{M}_{\{S'\}}\mathbf{M}_{\{S'\}}^\top$, which enables $\mathcal{O}(d^2)$ incremental rank-1 updates via the Sherman--Morrison formula.
+\end{remark}
+
+
+
+\subsection{Embedding-Based Geometric Value Functions}
+\label{subsec:geometric_values}
+
+Unlike sequence-dependent log-likelihood evaluations, the geometric value functions introduced in this section evaluate context utility through the spatial configuration of the embedding vectors $\{\mathbf{m}_i\}_{i \in S'} \cup \{\mathbf{r}\}$. Because Gram determinants and subspace projections depend solely on unordered sets of vectors, these value functions are \emph{permutation-invariant set functions} by construction, strictly preserving the axiomatic foundation of cooperative game theory.
+
+For any coalition of snippets $S' \subseteq [n]$ of cardinality $k = |S'|$, let $\mathbf{M}_{\{S'\}} \in \mathbb{R}^{d \times k}$ denote the matrix with columns $\{\mathbf{m}_i\}_{i \in S'}$, and let $\mathbf{g}_{\{S'\}} := \mathbf{M}_{\{S'\}}^\top \mathbf{r} \in \mathbb{R}^k$ collect the cosine similarities between the context snippets and the response. We define the augmented embedding matrix and its corresponding $(k+1) \times (k+1)$ Gram matrix by:
+\begin{align}
+    \mathbf{M}^{+}_{\{S'\}} := \big[\mathbf{M}_{\{S'\}}, \, \mathbf{r}\big] \in \mathbb{R}^{d \times (k+1)}, \qquad
+    \mathbf{G}^{+}_{\{S'\}} := (\mathbf{M}^{+}_{\{S'\}})^\top \mathbf{M}^{+}_{\{S'\}} =
+    \begin{bmatrix} 
+        \mathbf{G}_{\{S'\}} & \mathbf{g}_{\{S'\}} \\ 
+        \mathbf{g}_{\{S'\}}^\top & 1 
+    \end{bmatrix},
+\end{align}
+with the boundary convention $\operatorname{Vol}(\mathbf{M}_{\emptyset}) := 1$. The three value functions rest on the following foundational geometric factorization.
+
+\begin{lemma}[Volume Factorization]\label{lem:vol_factorization}
+For any coalition $S' \subseteq [n]$, the spatial volume of the augmented parallelotope factors as:
+\begin{align}
+    \operatorname{Vol}(\mathbf{M}^{+}_{\{S'\}}) = \operatorname{Vol}(\mathbf{M}_{\{S'\}}) \cdot d_{\perp}(\mathbf{r}, \mathcal{U}_{\{S'\}}).
+\end{align}
+\end{lemma}
+
+\begin{proof}
+If $\operatorname{rank}(\mathbf{M}_{\{S'\}}) < k$, then $\operatorname{det}(\mathbf{G}_{\{S'\}}) = 0$, the augmented vectors are linearly dependent, and both sides evaluate to zero. Otherwise, $\mathbf{G}_{\{S'\}}$ is strictly positive definite. Applying Schur's determinant formula to the block matrix $\mathbf{G}^{+}_{\{S'\}}$ yields:
+\begin{align*}
+    \det \mathbf{G}^{+}_{\{S'\}} &= \det \mathbf{G}_{\{S'\}} \cdot \big(1 - \mathbf{g}_{\{S'\}}^\top \mathbf{G}_{\{S'\}}^{-1} \mathbf{g}_{\{S'\}}\big) \\
+    &= \det \mathbf{G}_{\{S'\}} \cdot \big(\|\mathbf{r}\|_2^2 - \mathbf{r}^\top \mathbf{P}_{\{S'\}} \mathbf{r}\big) \\
+    &= \det \mathbf{G}_{\{S'\}} \cdot \|(\mathbf{I}_d - \mathbf{P}_{\{S'\}}) \mathbf{r}\|_2^2 \\
+    &= \det \mathbf{G}_{\{S'\}} \cdot d_{\perp}^2(\mathbf{r}, \mathcal{U}_{\{S'\}}).
+\end{align*}
+Taking the square root on both sides completes the proof.
+\end{proof}
+
+Geometrically, Lemma~\ref{lem:vol_factorization} demonstrates that incorporating the response $\mathbf{r}$ into the context parallelotope scales its base volume by precisely the orthogonal height of $\mathbf{r}$ above the context subspace $\mathcal{U}_{\{S'\}}$. We now formulate the three characteristic value functions.
+
+% -------------------------------------------------------------
+\paragraph{1. Volume Difference ($v_{\text{vol}}$).}
+The first value function quantifies information gain by measuring the reduction in spatial volume when the response vector is appended to the context set:
+\begin{align}\label{eq:v_vol}
+    v_{\text{vol}}(S') := \operatorname{Vol}(\mathbf{M}_{\{S'\}}) - \operatorname{Vol}(\mathbf{M}^{+}_{\{S'\}}) = \underbrace{\operatorname{Vol}(\mathbf{M}_{\{S'\}})}_{\text{Context Diversity}} \cdot \underbrace{\big(1 - d_{\perp}(\mathbf{r}, \mathcal{U}_{\{S'\}})\big)}_{\text{Semantic Alignment}}.
+\end{align}
+By construction, $v_{\text{vol}}(\emptyset) = 1 - 1 = 0$, and $v_{\text{vol}}(S') \in [0, 1]$ since both factors are bounded in $[0, 1]$. Equation~\eqref{eq:v_vol} reveals an intuitive trade-off: a context subset achieves high characteristic value only if it is simultaneously \emph{diverse} (large base volume $\operatorname{Vol}(\mathbf{M}_{\{S'\}})$) and \emph{semantically explanatory} ($d_{\perp} \to 0$). 
+
+However, $v_{\text{vol}}$ is inherently non-monotone. By Lemma~\ref{lem:vol_factorization}, appending an additional snippet $\mathbf{m}_i$ scales the base volume by $d_{\perp}(\mathbf{m}_i, \mathcal{U}_{\{S'\}}) \le 1$. If a newly added snippet is semantically redundant with the existing context ($\mathbf{m}_i \in \mathcal{U}_{\{S'\}}$), its inclusion collapses the base volume to zero, yielding $v_{\text{vol}}(S' \cup \{i\}) = 0 < v_{\text{vol}}(S')$. Consequently, $v_{\text{vol}}$ heavily penalizes informational redundancy, yielding signed marginal gains.
+
+% -------------------------------------------------------------
+\paragraph{2. Log-Volume Difference ($v_{\text{logvol}}$).}
+To isolate semantic explanation from base volume shrinkage, we take the difference of log-volumes. Applying Lemma~\ref{lem:vol_factorization} shows that the context base volume cancels out entirely:
+\begin{align}
+    \log \operatorname{Vol}(\mathbf{M}_{\{S'\}}) - \log \operatorname{Vol}(\mathbf{M}^{+}_{\{S'\}}) = -\log d_{\perp}(\mathbf{r}, \mathcal{U}_{\{S'\}}).
+\end{align}
+We therefore define the \textbf{log-volume value function} directly as the negative log-distance:
+\begin{align}\label{eq:v_logvol}
+    v_{\text{logvol}}(S') := -\log d_{\perp}(\mathbf{r}, \mathcal{U}_{\{S'\}}) = -\frac{1}{2} \log\big(1 - \mathbf{r}^\top \mathbf{P}_{\{S'\}} \mathbf{r}\big),
+\end{align}
+with the boundary condition $v_{\text{logvol}}(\emptyset) := -\log(1) = 0$. 
+
+
+\begin{remark}[Computational Efficiency via Tikhonov Regularization]
+If $\mathbf{r} \in \mathcal{U}_{\{S'\}}$, $d_{\perp} \to 0$ and $v_{\text{logvol}}$ diverges to $+\infty$. To ensure numerical stability and enable fast $\mathcal{O}(d^2)$ updates, we apply Tikhonov regularization $\mathbf{A}_{\{S'\}} := \lambda \mathbf{I}_d + \mathbf{M}_{\{S'\}}\mathbf{M}_{\{S'\}}^\top$ ($\lambda > 0$). Letting $\mathbf{B}_{\{S'\}} := \mathbf{A}_{\{S'\}}^{-1}$, the regularized marginal gain evaluates via the Sherman--Morrison formula:
+\begin{align}\label{eq:marginal_sherman}
+    \Delta v_{\text{logvol}}^{(\lambda)}(S', i) = -\frac{1}{2} \log\left( 1 - \frac{(\mathbf{r}^\top \mathbf{B}_{\{S'\}} \mathbf{m}_i)^2}{(1 + \mathbf{r}^\top \mathbf{B}_{\{S'\}} \mathbf{r})(1 + \mathbf{m}_i^\top \mathbf{B}_{\{S'\}} \mathbf{m}_i)} \right) \ge 0.
+\end{align}
+Traversing the power set in Gray-code order allows $\mathbf{B}_{\{S'\}}$ to be updated sequentially in $\mathcal{O}(d^2)$ algebraic operations per subset.
+\end{remark}
+
+% -------------------------------------------------------------
+\paragraph{3. Spectral Entropy Value Function ($v_{\text{ent}}$).}
+The third value function formulates attribution using the von Neumann spectral entropy of density matrices \cite{friedman2022vendi}. For any symmetric positive semidefinite Gram matrix $\mathbf{K}$ with $\operatorname{Tr}(\mathbf{K}) > 0$, we define its density matrix as $\boldsymbol{\rho}(\mathbf{K}) := \mathbf{K} / \operatorname{Tr}(\mathbf{K})$. The spectral entropy is defined over its non-negative eigenvalues $\{p_j\}$:
+\begin{align}
+    \mathcal{H}(\mathbf{K}) := -\operatorname{Tr}\big(\boldsymbol{\rho}(\mathbf{K}) \log \boldsymbol{\rho}(\mathbf{K})\big) = -\sum_{j} p_j \log p_j.
+\end{align}
+Because all embeddings have unit norm, $\operatorname{Tr}(\mathbf{G}^{+}_{\{S'\}}) = k + 1$, where $k = |S'|$. To determine how strongly the context explains the response, we define a decoupled reference Gram matrix $\bar{\mathbf{G}}^{+}_{\{S'\}}$, which represents the hypothetical geometry where the response $\mathbf{r}$ is perfectly orthogonal to the context subspace $\mathcal{U}_{\{S'\}}$:
+\begin{align}
+    \bar{\mathbf{G}}^{+}_{\{S'\}} := \begin{bmatrix} 
+        \mathbf{G}_{\{S'\}} & \mathbf{0} \\ 
+        \mathbf{0}^\top & 1 
+    \end{bmatrix} \in \mathbb{R}^{(k+1) \times (k+1)}.
+\end{align}
+The \emph{spectral entropy value function} $v_{\text{ent}}(S')$ is defined as the reduction in entropy relative to this orthogonal baseline:
+\begin{align}\label{eq:v_ent}
+    v_{\text{ent}}(S') := \mathcal{H}\big(\bar{\mathbf{G}}^{+}_{\{S'\}}\big) - \mathcal{H}\big(\mathbf{G}^{+}_{\{S'\}}\big).
+\end{align}
+
+
+
+In Appendix \ref{app:prop_emb}, the embedding based value functions are investigated. We summarize these results in Table \ref{tab:geom_value_comparison}. Note that monotonicity of value function guarantees that the raw Shapley values are strictly non-negative, thus simple rescaling can be applied to rescale it into the probability simplex, without breaking the linearity of 
+Shapley value. From this point of view, the Log-volume Difference value function is appealing, however, it is not bounded which implies the statistical error of its estimation more involved. Step complexity is important for efficient estimation as we shall show.
+\begin{table}[ht!]
+\centering
+\small
+\renewcommand{\arraystretch}{1.2}
+\begin{tabular}{lccccc}
+\hline
+\textbf{Value Function} & $v(\emptyset)=0$ & \textbf{Codomain} & \textbf{Monotone} & \textbf{Marginal Sign} & \textbf{Step Complexity} \\ \hline
+Volume Difference ($v_{\text{vol}}$)        & \checkmark & $[0, 1]$      & $\times$   & Signed       & $\mathcal{O}(dk)$ \\
+Log-Volume Difference ($v_{\text{logvol}}$) & \checkmark & $[0, \infty)$ & \checkmark & Non-negative & $\mathcal{O}(d^2)$ (via \eqref{eq:marginal_sherman}) \\
+Spectral Entropy ($v_{\text{ent}}$)         & \checkmark & $[0, \log 2]$ & $\times$   & Signed       & $\mathcal{O}(k^3)$ \\ \hline
+\end{tabular}
+\caption{Comparison of the three embedding-based characteristic functions.}
+\label{tab:geom_value_comparison}
+\end{table}
+
+% 
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+
+\section{Real-Time Context Attribution via Attention-Gram Subspaces}
+\label{sec:attention_gram_attribution}
+
+The value functions of Section~\ref{subsec:geometric_values} depend on the snippets and the response only through a Gram matrix of $n+1$ unit vectors. In this section, we obtain this Gram matrix from the language model itself rather than from an auxiliary encoder $f(\cdot)$. We call the resulting family \textbf{Attention-Gram Attribution (GATT)}. This has two advantages. First, no external embedding model is needed. Second, the geometry is defined by the representations the model actually used to generate $r$, so the attribution reflects the model's own routing of information rather than an external notion of semantic similarity. Post-softmax attention weights are a debated proxy for explanation~\cite{jain2019attention, wiegreffe2019attention} and must be aggregated across layers~\cite{abnar2020quantifying}. We instead use pre-softmax queries, keys and logits as inputs to the cooperative game of Section~\ref{sec:coop_game}, and we keep its axiomatic guarantees.
+
+\subsection{Notation: Multi-Head Causal Attention}
+\label{subsec:attention_notation}
+
+\paragraph{Token index sets.}
+Let $N$ be the length of the token sequence $(p, S, r)$. We partition the positions as $[N] = \mathcal{T}_p \cup \mathcal{T}_1 \cup \dots \cup \mathcal{T}_n \cup \mathcal{T}_r$, where $\mathcal{T}_i$ holds the tokens of snippet $s_i$, $\mathcal{T}_r$ those of the response, and $\mathcal{T}_p$ those of the prompt. Let $\mathcal{T}_{\text{ctx}} := \bigcup_{i=1}^n \mathcal{T}_i$. The response is generated after the context, so $c < t$ for all $c \in \mathcal{T}_{\text{ctx}}$ and $t \in \mathcal{T}_r$. Throughout, $t$ denotes a response token and $c$ a context token.
+
+\paragraph{Attention.}
+We follow the standard multi-head formulation~\cite{vaswani2017attention, qiu2025gated}. Let $\mathbf{X}^{(l)} \in \mathbb{R}^{N \times d_{\text{model}}}$ be the input of layer $l \in [L]$. Head $j \in [h]$ computes
+\begin{align}
+    \mathbf{Q}^{(l,j)} = \mathbf{X}^{(l)}\mathbf{W}_Q^{(l,j)}, \quad \mathbf{K}^{(l,j)} = \mathbf{X}^{(l)}\mathbf{W}_K^{(l,j)}, \quad \mathbf{V}^{(l,j)} = \mathbf{X}^{(l)}\mathbf{W}_V^{(l,j)},
+\end{align}
+with $\mathbf{W}_Q^{(l,j)}, \mathbf{W}_K^{(l,j)} \in \mathbb{R}^{d_{\text{model}} \times d_k}$ and $\mathbf{W}_V^{(l,j)} \in \mathbb{R}^{d_{\text{model}} \times d_v}$. We write $\mathbf{q}_t^{(l,j)}, \mathbf{k}_t^{(l,j)} \in \mathbb{R}^{d_k}$ for the $t$-th rows of $\mathbf{Q}^{(l,j)}$ and $\mathbf{K}^{(l,j)}$. For models with rotary position embeddings~\cite{su2024roformer}, these are the vectors \emph{after} rotation, so that the logits below are exactly those computed by the model. The pre-softmax logit matrix is
+\begin{align}\label{eq:sdpa_dot}
+    \mathbf{A}^{(l,j)} = \frac{\mathbf{Q}^{(l,j)}(\mathbf{K}^{(l,j)})^\top}{\sqrt{d_k}} \in \mathbb{R}^{N \times N}, \qquad A^{(l,j)}_{t,c} = \frac{\langle \mathbf{q}_t^{(l,j)}, \mathbf{k}_c^{(l,j)} \rangle}{\sqrt{d_k}}.
+\end{align}
+In a causal decoder, row $t$ of the attention weights is $\operatorname{softmax}$ of $(A^{(l,j)}_{t,c})_{c \le t}$, i.e., the entries $c > t$ are replaced by $-\infty$. The head outputs are concatenated and projected by $\mathbf{W}_O^{(l)} \in \mathbb{R}^{h d_v \times d_{\text{model}}}$.
+
+\paragraph{Causal blocks.}
+For snippet $s_i$, the block $\mathbf{A}^{(l,j)}_{\mathcal{T}_r, \mathcal{T}_i} \in \mathbb{R}^{|\mathcal{T}_r| \times |\mathcal{T}_i|}$ collects all logits with which response tokens query the tokens of $s_i$ (colored in Figure~\ref{fig:gram_construction}(a)). Since $\mathcal{T}_i$ precedes $\mathcal{T}_r$, these blocks are never masked. They carry the routing from the context to the response, and both constructions below are built around them.
+
+\paragraph{Layers and stacking.}
+Let $\mathcal{L}_{\text{glob}} \subseteq [L]$ be the layers whose attention window covers the entire context. In architectures that interleave sliding-window and global layers, only the latter can route information from distant snippets to the response. Let $m := |\mathcal{L}_{\text{glob}}| \cdot h$ and $d_{\text{attn}} := m\, d_k$. For a family of vectors $(\mathbf{x}^{(l,j)})_{l \in \mathcal{L}_{\text{glob}}, j \in [h]} \subset \mathbb{R}^{d_k}$, we write $\operatorname{stack}(\mathbf{x}) \in \mathbb{R}^{d_{\text{attn}}}$ for their vertical concatenation in a fixed order, and $\operatorname{Normalize}(\mathbf{x}) := \mathbf{x}/\|\mathbf{x}\|_2$ for $\mathbf{x} \neq \mathbf{0}$, with $\operatorname{Normalize}(\mathbf{0}) := \mathbf{0}$. Under grouped-query attention~\cite{ainslie2023gqa}, $\mathbf{k}_t^{(l,j)}$ denotes the key of the group that head $j$ belongs to; all formulas remain unchanged.
+
+\subsection{Why Not Symmetrize the Attention Matrix?}
+\label{subsec:no_symmetrization}
+
+The value functions of Section~\ref{subsec:geometric_values} require a symmetric positive semidefinite (PSD) Gram matrix, whereas $\mathbf{A}^{(l,j)}$ is neither symmetric nor PSD; attention is an asymmetric kernel~\cite{tsai2019transformer}. A tempting fix is to average $\mathbf{S} := \frac{1}{m} \sum_{l,j} \frac{1}{2}(\mathbf{A}^{(l,j)} + \mathbf{A}^{(l,j)\top})$, shift its spectrum, and normalize its diagonal. This fails for three reasons.
+\begin{enumerate}
+    \item \textbf{It mixes in masked entries.} The entry $S_{t,c} = \frac{1}{m}\sum_{l,j} \big(\langle \mathbf{q}_t^{(l,j)}, \mathbf{k}_c^{(l,j)} \rangle + \langle \mathbf{q}_c^{(l,j)}, \mathbf{k}_t^{(l,j)} \rangle\big) / (2\sqrt{d_k})$ averages each causal logit with an anti-causal logit $A_{c,t}$, $c < t$. The latter is masked: it never enters the forward pass and receives no gradient during training, so it carries no routing information.
+    \item \textbf{It is not PSD.} $\mathbf{S}$ is indefinite in general. Making it PSD by adding $|\lambda_{\min}(\mathbf{S})|\,\mathbf{I}_N$ inflates every diagonal entry by the same amount. After diagonal normalization, this shrinks all similarities by a factor that depends on the most negative eigenvalue of the entire sequence, including tokens unrelated to the snippets.
+    \item \textbf{Concatenation removes the interaction.} The PSD alternative 
+    $$\mathbf{z}_t := \frac{1}{\sqrt{2}}[\operatorname{Normalize}(\mathbf{q}_t); \operatorname{Normalize}(\mathbf{k}_t)]$$
+    gives $\langle \mathbf{z}_t, \mathbf{z}_c \rangle = \frac{1}{2}(\cos(\mathbf{q}_t, \mathbf{q}_c) + \cos(\mathbf{k}_t, \mathbf{k}_c))$. This contains no query--key term, i.e., it discards exactly the interaction through which the model routes information.
+\end{enumerate}
+The two constructions below avoid all three issues. They build one explicit vector per player, so the Gram matrix is PSD by construction, and they derive the snippet--response entries from the unmasked causal blocks only.
+
+\subsection{Two Causal Attention-Gram Constructions}
+\label{subsec:two_grams}
+
+Both constructions map each snippet $s_i$ to a vector $\mathbf{u}_i$ and the response to a vector $\mathbf{u}_r$, all of unit norm (or zero), and define
+\begin{align}\label{eq:attn_gram_blocks}
+    \bar{\mathbf{G}} := \big(\langle \mathbf{u}_a, \mathbf{u}_b \rangle\big)_{a, b \in [n] \cup \{r\}} = \begin{bmatrix} \bar{\mathbf{G}}_{[n],[n]} & \bar{\mathbf{g}} \\ \bar{\mathbf{g}}^\top & 1 \end{bmatrix} \in \mathbb{R}^{(n+1) \times (n+1)},
+\end{align}
+which has the same block structure as $\mathbf{G}^{+}_{\{[n]\}}$ in Section~\ref{subsec:geometric_values}. The upper-left block measures \emph{redundancy} among snippets, and the cross-terms $\bar{\mathbf{g}}$ measure the \emph{relevance} of each snippet to the response; see Figure~\ref{fig:gram_construction}.
+
+\begin{figure}[t]
+\centering
+\resizebox{\linewidth}{!}{%
+\begin{tikzpicture}[font=\scriptsize]
+    % ---------------- (a) Pre-softmax logit matrix ----------------
+    \fill[red!6]   (0,6) -- (6,6) -- (6,0) -- cycle;
+    \fill[gray!12] (0,6) -- (0,0) -- (6,0) -- cycle;
+    % causal blocks A_{T_r, T_i}
+    \fill[blue!30]   (0.8,0) rectangle (2.0,1.6);
+    \fill[orange!40] (2.0,0) rectangle (3.2,1.6);
+    \fill[green!35]  (3.2,0) rectangle (4.4,1.6);
+    % mirrored (masked) blocks A_{T_i, T_r}
+    \draw[dashed, thick, red!60] (4.4,1.6) rectangle (6,5.2);
+    % segment boundaries
+    \foreach \x in {0.8,2.0,3.2,4.4} { \draw[gray!60] (\x,0) -- (\x,6); }
+    \foreach \y in {5.2,4.0,2.8,1.6} { \draw[gray!60] (0,\y) -- (6,\y); }
+    \draw[thick] (0,0) rectangle (6,6);
+    \draw[gray] (0,6) -- (6,0);
+    % column / row labels
+    \node at (0.4,6.25) {$p$};   \node at (1.4,6.25) {$s_1$}; \node at (2.6,6.25) {$s_2$};
+    \node at (3.8,6.25) {$s_3$}; \node at (5.2,6.25) {$r$};
+    \node at (-0.25,5.6) {$p$};   \node at (-0.25,4.6) {$s_1$}; \node at (-0.25,3.4) {$s_2$};
+    \node at (-0.25,2.2) {$s_3$}; \node at (-0.25,0.8) {$r$};
+    \node at (3,6.65) {keys $\mathbf{k}^{(l,j)}_c$ (columns)};
+    \node[rotate=90] at (-0.75,3) {queries $\mathbf{q}^{(l,j)}_t$ (rows)};
+    \node[align=center, text=red!70] at (5.2,3.4) {$A_{c,t}$\\masked\\($-\infty$)};
+    \node[fill=white, inner sep=1pt, rounded corners] at (2.6,0.8) {$\mathbf{A}^{(l,j)}_{\mathcal{T}_r,\mathcal{T}_i}$};
+    \draw[<->, thick, red!70] (3.9,1.1) to[bend right=50] (5.1,2.5);
+    \node at (3,-0.4) {(a) Pre-softmax logits $\mathbf{A}^{(l,j)}$ (illustrated for $n=3$)};
+    % arrow
+    \draw[-latex, very thick, black!60] (6.3,0.8) -- (8.4,2.2) node[midway, above, sloped] {pool per snippet};
+    % ---------------- (b) Resulting Gram matrix ----------------
+    \begin{scope}[shift={(9,1.0)}]
+        \fill[violet!15] (0,0.9)   rectangle (2.7,3.6);
+        \fill[teal!25]   (2.7,0.9) rectangle (3.6,3.6);
+        \fill[teal!25]   (0,0)     rectangle (2.7,0.9);
+        \fill[gray!20]   (2.7,0)   rectangle (3.6,0.9);
+        \draw[step=0.9, gray!60] (0,0) grid (3.6,3.6);
+        \draw[thick] (0,0) rectangle (3.6,3.6);
+        \draw[thick] (2.7,0) -- (2.7,3.6);
+        \draw[thick] (0,0.9) -- (3.6,0.9);
+        \node at (3.15,0.45) {$1$};
+        \node at (1.35,2.25) {redundancy};
+        \node[rotate=90] at (3.15,2.25) {relevance $\bar{\mathbf{g}}$};
+        \node at (1.35,0.45) {relevance $\bar{\mathbf{g}}^\top$};
+        \node at (0.45,3.85) {$s_1$}; \node at (1.35,3.85) {$s_2$};
+        \node at (2.25,3.85) {$s_3$}; \node at (3.15,3.85) {$r$};
+        \node at (-0.3,3.15) {$s_1$}; \node at (-0.3,2.25) {$s_2$};
+        \node at (-0.3,1.35) {$s_3$}; \node at (-0.3,0.45) {$r$};
+        \node at (1.8,-0.4) {(b) Gram matrix $\bar{\mathbf{G}} \in \mathbb{R}^{(n+1)\times(n+1)}$};
+    \end{scope}
+    \node[anchor=west] at (8.4,0.05)  {\textbf{RCB:} $\bar{G}_{ab} = \langle \mathbf{u}_a, \mathbf{u}_b \rangle$, pooled centered keys $\mathbf{u}_i$, pooled query $\mathbf{u}_r$};
+    \node[anchor=west] at (8.4,-0.4)  {\textbf{TCR:} $\bar{G}_{ab} = \langle \hat{\mathbf{f}}_a, \hat{\mathbf{f}}_b \rangle$, routing profiles read off the colored blocks};
+\end{tikzpicture}%
+}
+\caption{Construction of the attention Gram matrices. (a)~Pre-softmax logits of one head. The colored causal blocks $\mathbf{A}^{(l,j)}_{\mathcal{T}_r, \mathcal{T}_i}$ contain the logits with which response tokens query snippet $s_i$; they are never masked. The dashed region contains the mirrored anti-causal entries, which are masked and receive no gradient; symmetrization $\frac{1}{2}(\mathbf{A} + \mathbf{A}^\top)$ pairs each colored entry with one of them (red arrow). (b)~Both constructions map each snippet and the response to one vector, which yields an $(n+1) \times (n+1)$ PSD Gram matrix. Its snippet--response entries are derived from the colored blocks: in RCB they are head-averaged centered logits of these blocks (Proposition~\ref{prop:rcb}), and in TCR they compare the routing profiles extracted from them.}
+\label{fig:gram_construction}
+\end{figure}
+
+\subsubsection{Role-Aligned Causal Bilinear (RCB) Gram}
+\label{subsubsec:rcb}
+
+RCB represents each player in the role it plays in the causal logit $\langle \mathbf{q}_t, \mathbf{k}_c \rangle$: snippets as \emph{keys} and the response as a \emph{query}.
+
+\begin{enumerate}
+    \item \textbf{Anchor tokens.} Let $\bar{A}_c := \frac{1}{m |\mathcal{T}_r|} \sum_{l \in \mathcal{L}_{\text{glob}}} \sum_{j=1}^{h} \sum_{t \in \mathcal{T}_r} A^{(l,j)}_{t,c}$ be the mean causal logit received by the context token $c \in \mathcal{T}_{\text{ctx}}$. Let $\mathcal{T}_i^{\text{top}} \subseteq \mathcal{T}_i$ be the $k_0$ tokens of $s_i$ with the largest $\bar{A}_c$ (or all of $\mathcal{T}_i$ if $|\mathcal{T}_i| \le k_0$).
+    \item \textbf{Centered snippet keys.} With the mean context key $\bar{\mathbf{k}}_{\text{ctx}}^{(l,j)} := \frac{1}{|\mathcal{T}_{\text{ctx}}|} \sum_{c \in \mathcal{T}_{\text{ctx}}} \mathbf{k}_c^{(l,j)}$, define
+    \begin{align}
+        \tilde{\mathbf{k}}_i^{(l,j)} := \operatorname{Normalize}\Big( \frac{1}{|\mathcal{T}_i^{\text{top}}|} \sum_{c \in \mathcal{T}_i^{\text{top}}} \mathbf{k}_c^{(l,j)} - \bar{\mathbf{k}}_{\text{ctx}}^{(l,j)} \Big), \qquad \mathbf{u}_i := \operatorname{Normalize}\big( \operatorname{stack}(\tilde{\mathbf{k}}_i) \big).
+    \end{align}
+    \item \textbf{Response query.}
+    \begin{align}
+        \tilde{\mathbf{q}}_r^{(l,j)} := \operatorname{Normalize}\Big( \frac{1}{|\mathcal{T}_r|} \sum_{t \in \mathcal{T}_r} \mathbf{q}_t^{(l,j)} \Big), \qquad \mathbf{u}_r := \operatorname{Normalize}\big( \operatorname{stack}(\tilde{\mathbf{q}}_r) \big).
+    \end{align}
+    \item \textbf{Gram matrix.} $\bar{\mathbf{G}}^{\text{RCB}} := (\langle \mathbf{u}_a, \mathbf{u}_b \rangle)_{a,b \in [n] \cup \{r\}}$ as in~\eqref{eq:attn_gram_blocks}.
+\end{enumerate}
+
+\begin{proposition}[Properties of the RCB Gram]\label{prop:rcb}
+Assume that all centered snippet keys and pooled response queries are non-zero.
+\begin{enumerate}
+    \item[(i)] $\bar{\mathbf{G}}^{\text{RCB}}$ is symmetric PSD with unit diagonal.
+    \item[(ii)] \textbf{Centering does not change attention.} For every query $\mathbf{q}$ and every vector $\bar{\mathbf{k}}$, $\operatorname{softmax}_c\big(\langle \mathbf{q}, \mathbf{k}_c - \bar{\mathbf{k}} \rangle / \sqrt{d_k}\big) = \operatorname{softmax}_c\big(\langle \mathbf{q}, \mathbf{k}_c \rangle / \sqrt{d_k}\big)$.
+    \item[(iii)] \textbf{Cross-terms are averaged causal logits.} The relevance entries are head-averaged cosines,
+    \begin{align}
+        \langle \mathbf{u}_i, \mathbf{u}_r \rangle = \frac{1}{m} \sum_{l \in \mathcal{L}_{\text{glob}}} \sum_{j=1}^h \cos\big(\tilde{\mathbf{k}}_i^{(l,j)}, \tilde{\mathbf{q}}_r^{(l,j)}\big),
+    \end{align}
+    and before the per-head normalization, each summand is the centered mean logit of the causal block:
+    \begin{align}\label{eq:rcb_block_logit}
+        \Big\langle \frac{1}{|\mathcal{T}_r|} \sum_{t \in \mathcal{T}_r} \mathbf{q}_t^{(l,j)}, \; \frac{1}{|\mathcal{T}_i^{\text{top}}|} \sum_{c \in \mathcal{T}_i^{\text{top}}} \mathbf{k}_c^{(l,j)} - \bar{\mathbf{k}}_{\text{ctx}}^{(l,j)} \Big\rangle = \sqrt{d_k} \Big( \operatorname*{mean}_{t \in \mathcal{T}_r,\, c \in \mathcal{T}_i^{\text{top}}} A^{(l,j)}_{t,c} - \operatorname*{mean}_{t \in \mathcal{T}_r,\, c \in \mathcal{T}_{\text{ctx}}} A^{(l,j)}_{t,c} \Big).
+    \end{align}
+\end{enumerate}
+\end{proposition}
+
+\begin{proof}
+(i) $\bar{\mathbf{G}}^{\text{RCB}}$ is the Gram matrix of $n+1$ unit vectors. (ii) Subtracting $\bar{\mathbf{k}}$ shifts every logit in the row by the same constant $\langle \mathbf{q}, \bar{\mathbf{k}} \rangle / \sqrt{d_k}$, and softmax is invariant to such shifts. (iii) $\operatorname{stack}(\tilde{\mathbf{k}}_i)$ concatenates $m$ unit vectors and therefore has norm $\sqrt{m}$, and likewise for $\operatorname{stack}(\tilde{\mathbf{q}}_r)$. Hence $\langle \mathbf{u}_i, \mathbf{u}_r \rangle = \frac{1}{m} \sum_{l,j} \langle \tilde{\mathbf{k}}_i^{(l,j)}, \tilde{\mathbf{q}}_r^{(l,j)} \rangle$. Identity~\eqref{eq:rcb_block_logit} follows from the bilinearity of the inner product and~\eqref{eq:sdpa_dot}.
+\end{proof}
+
+By (ii), centering removes a component shared by all keys that is invisible to the model's routing but would otherwise dominate the cosine similarities. By (iii), the relevance entries of RCB are, up to per-head normalization, the centered logits of exactly the causal blocks in Figure~\ref{fig:gram_construction}(a). The redundancy block compares snippets in key space: two snippets with similar keys are retrieved by the same queries and therefore act as substitutes. Note that the model never computes key--key inner products itself, so this block is a proxy for redundancy.
+
+\subsubsection{Thresholded Causal Routing (TCR) Gram}
+\label{subsubsec:tcr}
+
+TCR represents each snippet by \emph{which heads route to it at which decoding steps}. It uses the logits of the causal blocks only. Let $\mathcal{I} := \mathcal{L}_{\text{glob}} \times [h] \times \mathcal{T}_r$ be the index set of (layer, head, response token) triples, with $D := |\mathcal{I}| = m |\mathcal{T}_r|$.
+
+\begin{enumerate}
+    \item \textbf{Background threshold.} For each $(l,j,t) \in \mathcal{I}$, let $\tau_{l,j,t} := \operatorname{Quantile}_\kappa\{A^{(l,j)}_{t,c} : c \in \mathcal{T}_{\text{ctx}}\}$ be the $\kappa$-quantile of the logits of row $t$ over the context ($\kappa = 0.9$ in our experiments, additionally capped at the median over snippets of the top-$k_0$ logit).
+    \item \textbf{Snippet routing profiles.} Let $\mathcal{T}_i^{\text{top}}(l,j,t) \subseteq \mathcal{T}_i$ be the $k_0$ tokens of $s_i$ with the largest logit $A^{(l,j)}_{t,c}$. The profile $\mathbf{f}_i \in \mathbb{R}_{\ge 0}^{D}$ has entries
+    \begin{align}
+        f_i(l,j,t) := \frac{1}{k_0} \sum_{c \in \mathcal{T}_i^{\text{top}}(l,j,t)} \big( A^{(l,j)}_{t,c} - \tau_{l,j,t} \big)^+.
+    \end{align}
+    \item \textbf{Response profile.} $f_r(l,j,t) := \max_{i \in [n]} f_i(l,j,t)$, i.e., the strongest routing to any snippet at each coordinate.
+    \item \textbf{Gram matrix.} With $\hat{\mathbf{f}}_a := \operatorname{Normalize}(\mathbf{f}_a)$, set $\mathbf{u}_a := \hat{\mathbf{f}}_a$ and $\bar{\mathbf{G}}^{\text{TCR}} := (\langle \hat{\mathbf{f}}_a, \hat{\mathbf{f}}_b \rangle)_{a,b \in [n] \cup \{r\}}$.
+\end{enumerate}
+
+\begin{proposition}[Properties of the TCR Gram]\label{prop:tcr}
+\begin{enumerate}
+    \item[(i)] $\bar{\mathbf{G}}^{\text{TCR}}$ is symmetric PSD and entrywise non-negative.
+    \item[(ii)] \textbf{Inactive snippets are null players.} If $s_i$ never exceeds the threshold ($\mathbf{f}_i = \mathbf{0}$), then $\phi_i(v_{\text{logvol}}) = 0$.
+    \item[(iii)] \textbf{Disjoint routing.} If the supports of $\mathbf{f}_1, \dots, \mathbf{f}_n$ are pairwise disjoint and $\mathbf{f}_r \neq \mathbf{0}$, then $\mathbf{f}_r = \sum_i \mathbf{f}_i$, and the squared relevance entries $\langle \hat{\mathbf{f}}_i, \hat{\mathbf{f}}_r \rangle^2 = \|\mathbf{f}_i\|_2^2 / \|\mathbf{f}_r\|_2^2$ sum to one. They are the shares of the routing energy received by each snippet.
+\end{enumerate}
+\end{proposition}
+
+\begin{proof}
+(i) Gram matrix of non-negative vectors. (ii) $\hat{\mathbf{f}}_i = \mathbf{0}$ does not change the span of any coalition, so $d_{\perp}(\mathbf{r}, \mathcal{U}_{\{S' \cup \{i\}\}}) = d_{\perp}(\mathbf{r}, \mathcal{U}_{\{S'\}})$ and $\Delta v_{\text{logvol}}(S', i) = 0$ for all $S'$; apply the Null player axiom. (iii) With disjoint supports, the coordinate-wise maximum equals the sum, and $\langle \mathbf{f}_i, \mathbf{f}_r \rangle = \|\mathbf{f}_i\|_2^2$. Orthogonality gives $\|\mathbf{f}_r\|_2^2 = \sum_i \|\mathbf{f}_i\|_2^2$.
+\end{proof}
+
+Snippets that activate the same heads at the same decoding steps have a large inner product and therefore share their Shapley credit, while snippets routed through different heads or steps receive complementary credit, as in multi-hop reasoning. In the setting of (iii), the response lies in the span of all snippets, so $v_{\text{logvol}}([n]) = \infty$, and the regularized value function of~\eqref{eq:marginal_sherman} must be used.
+
+\paragraph{Comparison.}
+RCB uses pooled query and key \emph{vectors}. Its cost is $\mathcal{O}(N d_{\text{attn}})$, and it has a single hyperparameter $k_0$. TCR uses only the logits of the causal blocks, which can be computed from the cached queries of $\mathcal{T}_r$ and keys of $\mathcal{T}_{\text{ctx}}$ without materializing $\mathbf{A}^{(l,j)}$, at cost $\mathcal{O}(m |\mathcal{T}_r| |\mathcal{T}_{\text{ctx}}| d_k)$. It has two hyperparameters, $k_0$ and $\kappa$. RCB measures \emph{alignment} of representations, whereas TCR measures \emph{actual routing above background}.
+
+\subsection{From the Attention Gram to Attributions}
+\label{subsec:gatt_pipeline}
+
+Given either construction, attributions are computed as follows.
+\begin{enumerate}
+    \item \textbf{Forward pass.} Run the model once on $(p, S, r)$ (this can be the generation pass itself) and cache $\mathbf{q}_t^{(l,j)}$, $\mathbf{k}_c^{(l,j)}$ for $t \in \mathcal{T}_r$, $c \in \mathcal{T}_{\text{ctx}}$ and $l \in \mathcal{L}_{\text{glob}}$.
+    \item \textbf{Gram matrix.} Build $\bar{\mathbf{G}} \in \mathbb{R}^{(n+1) \times (n+1)}$ by RCB or TCR.
+    \item \textbf{Value function.} Substitute $\mathbf{G}_{\{S'\}} := \bar{\mathbf{G}}_{S',S'}$ and $\mathbf{g}_{\{S'\}} := \bar{\mathbf{g}}_{S'}$ into the value functions of Section~\ref{subsec:geometric_values}. All three depend on these blocks only. $v_{\text{vol}}$ uses determinants. $v_{\text{logvol}}(S') = -\frac{1}{2}\log\big(1 - \mathbf{g}_{\{S'\}}^\top \mathbf{G}_{\{S'\}}^{\dagger} \mathbf{g}_{\{S'\}}\big)$ follows from Lemma~\ref{lem:vol_factorization}. $v_{\text{ent}}$ uses the eigenvalues of $\bar{\mathbf{G}}_{S' \cup \{r\}, S' \cup \{r\}}$. Once $\bar{\mathbf{G}}$ is built, the $d_{\text{attn}}$-dimensional vectors are no longer needed. To keep $v_{\text{logvol}}$ finite, replace $\mathbf{G}_{\{S'\}}$ by $\mathbf{G}_{\{S'\}} + \lambda \mathbf{I}$.
+    \item \textbf{Shapley values.} For small $n$, enumerate all $2^n$ coalitions, with each evaluation costing $\mathcal{O}(|S'|^3)$, or $\mathcal{O}(|S'|^2)$ with incremental Cholesky updates. Otherwise, average marginal gains over $K$ random permutations, which is unbiased by Lemma~\ref{lemma:unbiased_estimator}.
+    \item \textbf{Link and global weight.} Map $\boldsymbol{\phi}$ to the simplex with a link function (Section~\ref{subsec:link_functions}), applied once to the averaged estimate, and scale by $w$. Computing $w$ requires $\log P(r \mid p, S)$, available from step~1, and $\log P(r \mid p)$, which requires \emph{one additional} prompt-only forward pass.
+\end{enumerate}
+Thus, GATT requires two forward passes in total, one of which can be shared with generation, independently of $n$. By contrast, likelihood-based Shapley estimation requires $Kn + 1$ passes (Section~\ref{sec:llh_shapley}).
+
+\subsection{Background Floor and Contrast Calibration}
+\label{subsec:contrast_calibration}
+
+Empirically, distractor snippets receive positive Shapley values of similar magnitude under both constructions. All context tokens share components driven by the common prompt, the positional encoding, and syntax, and part of the attention mass is absorbed by sink tokens irrespective of content~\cite{xiao2024efficient}. As a stylized model, suppose that $v = v_0 + b\,|S'|$, i.e., every snippet contributes a fixed amount $b > 0$ independently of the coalition. Since $\boldsymbol{\phi}$ is linear and the additive game $b\,|S'|$ has Shapley vector $b\mathbf{1}$, we get $\boldsymbol{\phi}(v) = \boldsymbol{\phi}(v_0) + b\mathbf{1}$. Under the linear or rectified link, each distractor then receives a share of order $b / v([n])$, which inflates distractor mass without changing the ranking. We resolve this issue by using Floor-shifted power link. This is the power link of Section~\ref{subsec:link_functions} applied to $\boldsymbol{\phi} - \phi_{\min}\mathbf{1}$. For $\gamma = 1$ it only removes the floor, and $\gamma > 1$ additionally sharpens the distribution ($\gamma = 2$ in our experiments).
+
+\begin{proposition}[Properties of the floor-shifted power link]\label{prop:rank_invariance}
+For every $\gamma > 0$:
+\begin{enumerate}
+    \item[(i)] $g^{\text{fl},\gamma}(\boldsymbol{\phi}) \in \Delta^{n-1}$.
+    \item[(ii)] \textbf{Order preservation.} $\phi_i > \phi_k \Leftrightarrow g^{\text{fl},\gamma}_i(\boldsymbol{\phi}) > g^{\text{fl},\gamma}_k(\boldsymbol{\phi})$. Hence all within-example ordinal metrics (AUROC, Spearman's $\rho$, Kendall's $\tau$, Precision@$k$, top-1 agreement) coincide with those of $\boldsymbol{\phi}$.
+    \item[(iii)] \textbf{Floor removal.} Every snippet attaining $\phi_{\min}$ receives zero contribution.
+    \item[(iv)] \textbf{Affine invariance.} $g^{\text{fl},\gamma}(c\boldsymbol{\phi} + b\mathbf{1}) = g^{\text{fl},\gamma}(\boldsymbol{\phi})$ for all $c > 0$ and $b \in \mathbb{R}$. In particular, (P3) holds, and the floor $b\mathbf{1}$ of the stylized model above is removed exactly.
+    \item[(v)] It violates Null player (P2) and Faithfulness (P4).
+\end{enumerate}
+\end{proposition}
+
+\begin{proof}
+(i) If not all $\phi_j$ are equal, the numerators are non-negative and their sum is positive; otherwise, the output is uniform. (ii) $x \mapsto (x - \phi_{\min})^\gamma$ is strictly increasing on $[\phi_{\min}, \infty)$, and the normalization is a common positive factor. (iii) $(\phi_{\min} - \phi_{\min})^\gamma = 0$. (iv) Both $\phi_i - \phi_{\min}$ and the normalization are invariant to $b$, and the factor $c^\gamma$ cancels. (v) For $\boldsymbol{\phi} = (-1, 0, 2)$, the null player $i = 2$ receives $1/(1 + 3^\gamma) > 0$. For $\boldsymbol{\phi} = (2, 1)$, the output $(1, 0)$ differs from $\boldsymbol{\phi}/\mathbf{1}^\top\boldsymbol{\phi} = (2/3, 1/3)$.
+\end{proof}
+
+By (iv), the floor-shifted link is the natural choice when Shapley values contain a common offset. However, (iii) and (v) come at a price: the snippet with the lowest Shapley value always receives zero credit, even if every snippet supports the response. The link is therefore appropriate when the retrieved context is known to contain at least one distractor, and results should also be reported with the rectified link. Since it is non-linear, it must be applied to the averaged Monte Carlo estimate rather than to individual permutations.
+
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+
+\section{Set-Valued Embedding Games}
+\label{sec:set_embeddings}
+
+The value functions of Section~\ref{subsec:geometric_values} represent every player by a \emph{single} unit vector: the snippet $s_i$ by $\mathbf{m}_i = f(s_i)$ and the response by $\mathbf{r} = f(r)$. A snippet, however, is a sequence of tokens, and a transformer represents it by one vector per token in every layer and head. Pooling these vectors into one vector discards information: two snippets can have nearly identical mean embeddings and still support entirely different facts, and a response that combines a date from one snippet with a name from another is poorly described by the mean of its token embeddings. In this section, we extend the three value functions to players that are represented by \emph{sets} of vectors, i.e., by subspaces, and we then apply the extension to the value vectors of the transformer that generated the response. The players of the cooperative game remain the $n$ snippets; only their geometric representation changes. All axiomatic guarantees of Section~\ref{sec:coop_game} therefore continue to hold.
+
+\subsection{Players as Sets of Vectors}
+\label{subsec:set_notation}
+
+Each snippet $s_i$ is represented by a matrix $\mathbf{M}_i \in \mathbb{R}^{d \times N_i}$ whose $N_i$ columns are vectors associated with $s_i$, e.g., the contextual embeddings of its tokens. Likewise, the response is represented by $\mathbf{R} = [\mathbf{r}_1, \dots, \mathbf{r}_{N_r}] \in \mathbb{R}^{d \times N_r}$, together with non-negative weights $\omega_1, \dots, \omega_{N_r}$ that sum to one (uniform unless stated otherwise). For a coalition $S' \subseteq [n]$, we concatenate the matrices of its members,
+\begin{align}
+    \mathbf{M}_{\{S'\}} := \big[\mathbf{M}_i\big]_{i \in S'} \in \mathbb{R}^{d \times N_{S'}}, \qquad N_{S'} := \sum_{i \in S'} N_i,
+\end{align}
+and denote by $\mathcal{U}_i := \operatorname{span}(\mathbf{M}_i)$, $\mathcal{U}_{\{S'\}} := \operatorname{span}(\mathbf{M}_{\{S'\}}) = \sum_{i \in S'} \mathcal{U}_i$ and $\mathcal{U}_R := \operatorname{span}(\mathbf{R})$ the corresponding subspaces, with $\mathcal{U}_{\emptyset} := \{\mathbf{0}\}$. The orthogonal projection onto $\mathcal{U}_{\{S'\}}$ is $\mathbf{P}_{\{S'\}} := \mathbf{M}_{\{S'\}} \mathbf{M}_{\{S'\}}^{\dagger}$, exactly as in Section~\ref{subsec:geometric_values}. The single-vector setting is the special case $N_i = N_r = 1$.
+
+\paragraph{Block Gram matrix.}
+All quantities below depend on the vectors only through the block Gram matrix
+\begin{align}\label{eq:set_gram}
+    \mathbf{G}^{+}_{\{S'\}} := \big[\mathbf{M}_{\{S'\}}, \mathbf{R}\big]^\top \big[\mathbf{M}_{\{S'\}}, \mathbf{R}\big] =
+    \begin{bmatrix}
+        \mathbf{G}_{\{S'\}} & \mathbf{C}_{\{S'\}} \\
+        \mathbf{C}_{\{S'\}}^\top & \mathbf{G}_{R}
+    \end{bmatrix},
+\end{align}
+with $\mathbf{G}_{\{S'\}} = \mathbf{M}_{\{S'\}}^\top \mathbf{M}_{\{S'\}}$, $\mathbf{C}_{\{S'\}} = \mathbf{M}_{\{S'\}}^\top \mathbf{R}$ and $\mathbf{G}_{R} = \mathbf{R}^\top \mathbf{R}$.
+It generalizes $\mathbf{G}^{+}_{\{S'\}}$ of Section~\ref{subsec:geometric_values}: the scalar entries $\langle \mathbf{m}_i, \mathbf{m}_j \rangle$, $\langle \mathbf{m}_i, \mathbf{r} \rangle$ and $1$ become the blocks $\mathbf{M}_i^\top \mathbf{M}_j$, $\mathbf{M}_i^\top \mathbf{R}$ and $\mathbf{G}_R$. The diagonal blocks $\mathbf{M}_i^\top \mathbf{M}_i$ describe the internal geometry of a snippet, the off-diagonal blocks $\mathbf{M}_i^\top \mathbf{M}_j$ the redundancy between snippets, and $\mathbf{C}_{\{S'\}}$ the relevance of the snippets to the response tokens. Exactly as for GATT (Section~\ref{subsec:gatt_pipeline}), the vectors are no longer needed once the Gram matrix of all $N_{[n]} + N_r$ vectors has been computed.
+
+\paragraph{Principal angles.}
+The natural generalization of the angle between $\mathbf{r}$ and $\mathcal{U}_{\{S'\}}$ is the sequence of principal angles between subspaces~\cite{bjorck1973numerical}. Let $\mathbf{Q}_R \in \mathbb{R}^{d \times k_r}$ be an orthonormal basis of $\mathcal{U}_R$ (or of a truncation of it, see Section~\ref{subsec:set_regularization}). The principal angles $0 \le \theta_1(S') \le \dots \le \theta_{k_r}(S') \le \pi/2$ between $\mathcal{U}_R$ and $\mathcal{U}_{\{S'\}}$ are defined by
+\begin{align}\label{eq:principal_angles}
+    \cos^2 \theta_k(S') := \lambda_k\big(\mathbf{Q}_R^\top \mathbf{P}_{\{S'\}} \mathbf{Q}_R\big), \qquad k \in [k_r],
+\end{align}
+where $\lambda_1 \ge \dots \ge \lambda_{k_r}$ denote the eigenvalues in decreasing order. For $k_r = 1$ and $\mathbf{Q}_R = \mathbf{r}$, $\sin \theta_1(S') = d_{\perp}(\mathbf{r}, \mathcal{U}_{\{S'\}})$.
+
+\paragraph{Orthonormal player bases.}
+Unit normalization in the single-vector setting ensures that a player's value does not depend on the norm of its embedding. The set-valued analogue is to represent each player by an orthonormal basis $\mathbf{Q}_i \in \mathbb{R}^{d \times k_i}$ of $\mathcal{U}_i$ (or of its dominant $k_i$-dimensional part). Then the diagonal blocks of $\mathbf{G}_{\{S'\}}$ are identity matrices, $\operatorname{Tr}(\mathbf{G}^{+}_{\{S'\}}) = \sum_{i \in S'} k_i + k_r$, and the off-diagonal blocks $\mathbf{Q}_i^\top \mathbf{Q}_j$ have the cosines of the principal angles between $\mathcal{U}_i$ and $\mathcal{U}_j$ as singular values. Redundancy \emph{within} a snippet (many tokens that encode the same content) then no longer affects the value, while redundancy \emph{between} snippets does. The projection-based value functions $v_{\text{proj}}$ and $v_{\text{logvol}}$ below depend only on the subspaces and are therefore unaffected by this choice; $v_{\text{vol}}$ and $v_{\text{ent}}$ require it.
+
+\subsection{Set-Valued Value Functions}
+\label{subsec:set_values}
+
+The volume factorization of Lemma~\ref{lem:vol_factorization} generalizes verbatim, with the scalar residual $d_{\perp}^2$ replaced by the Gram matrix of the residual response vectors.
+
+\begin{lemma}[Block Volume Factorization]\label{lem:block_vol_factorization}
+For every coalition $S' \subseteq [n]$ such that $\mathbf{M}_{\{S'\}}$ has full column rank,
+\begin{align}
+    \det \mathbf{G}^{+}_{\{S'\}} = \det \mathbf{G}_{\{S'\}} \cdot \det \boldsymbol{\Sigma}_{R \mid S'}, \qquad
+    \boldsymbol{\Sigma}_{R \mid S'} := \mathbf{G}_R - \mathbf{C}_{\{S'\}}^\top \mathbf{G}_{\{S'\}}^{-1} \mathbf{C}_{\{S'\}} = \mathbf{R}^\top (\mathbf{I}_d - \mathbf{P}_{\{S'\}}) \mathbf{R}.
+\end{align}
+If, moreover, $\mathbf{R} = \mathbf{Q}_R$ has orthonormal columns, then $\det \boldsymbol{\Sigma}_{R \mid S'} = \prod_{k=1}^{k_r} \sin^2 \theta_k(S')$.
+\end{lemma}
+
+\begin{proof}
+The first identity is Schur's determinant formula for the block matrix~\eqref{eq:set_gram}; the second expression for $\boldsymbol{\Sigma}_{R \mid S'}$ follows from $\mathbf{P}_{\{S'\}} = \mathbf{M}_{\{S'\}} \mathbf{G}_{\{S'\}}^{-1} \mathbf{M}_{\{S'\}}^\top$. If $\mathbf{R} = \mathbf{Q}_R$, then $\boldsymbol{\Sigma}_{R \mid S'} = \mathbf{I}_{k_r} - \mathbf{Q}_R^\top \mathbf{P}_{\{S'\}} \mathbf{Q}_R$, whose eigenvalues are $1 - \cos^2 \theta_k(S') = \sin^2 \theta_k(S')$ by~\eqref{eq:principal_angles}.
+\end{proof}
+
+\paragraph{Projected Response Energy ($v_{\text{proj}}$).}
+The most direct way to ask how much of the response is explained by a coalition is to project every response vector onto the coalition subspace and to measure the fraction of the response energy that is captured:
+\begin{align}\label{eq:v_proj}
+    v_{\text{proj}}(S') := \frac{\sum_{t=1}^{N_r} \omega_t \, \|\mathbf{P}_{\{S'\}} \mathbf{r}_t\|_2^2}{\sum_{t=1}^{N_r} \omega_t \, \|\mathbf{r}_t\|_2^2} = \frac{\operatorname{Tr}\big(\boldsymbol{\Omega}^{1/2} \mathbf{C}_{\{S'\}}^\top \mathbf{G}_{\{S'\}}^{\dagger} \mathbf{C}_{\{S'\}} \boldsymbol{\Omega}^{1/2}\big)}{\operatorname{Tr}\big(\boldsymbol{\Omega}^{1/2} \mathbf{G}_R \boldsymbol{\Omega}^{1/2}\big)} \in [0, 1],
+\end{align}
+with $\boldsymbol{\Omega} := \operatorname{diag}(\omega_1, \dots, \omega_{N_r})$ and $v_{\text{proj}}(\emptyset) = 0$. In the single-vector setting, $v_{\text{proj}}(S') = \mathbf{r}^\top \mathbf{P}_{\{S'\}} \mathbf{r} = 1 - d_{\perp}^2(\mathbf{r}, \mathcal{U}_{\{S'\}})$, a monotone transformation of $v_{\text{logvol}}$; we did not list it separately in Section~\ref{subsec:geometric_values} for this reason. For sets, the two differ: $v_{\text{proj}}$ averages the explained energy over the response, whereas $v_{\text{logvol}}$ below rewards explaining \emph{every} response direction. If the response is represented by an orthonormal basis with uniform weights, $v_{\text{proj}}(S') = \frac{1}{k_r} \sum_{k} \cos^2 \theta_k(S')$.
+
+Since $v_{\text{proj}}$ is a weighted average of the per-token games $v_t(S') := \|\mathbf{P}_{\{S'\}} \mathbf{r}_t\|_2^2 / \|\mathbf{r}_t\|_2^2$, the Linearity axiom yields a token-level decomposition of every snippet's credit,
+\begin{align}\label{eq:v_proj_token_decomposition}
+    \phi_i(v_{\text{proj}}) = \sum_{t=1}^{N_r} \tilde{\omega}_t \, \phi_i(v_t), \qquad \tilde{\omega}_t := \frac{\omega_t \|\mathbf{r}_t\|_2^2}{\sum_{t'} \omega_{t'} \|\mathbf{r}_{t'}\|_2^2},
+\end{align}
+which states which response tokens are explained by which snippets.
+
+\paragraph{Principal-Angle Log-Volume ($v_{\text{logvol}}$).}
+Following~\eqref{eq:v_logvol}, we define the log-volume value function as the negative log-volume of the residual of the (orthonormalized) response:
+\begin{align}\label{eq:set_v_logvol}
+    v_{\text{logvol}}(S') := -\frac{1}{2} \log \det \big(\mathbf{I}_{k_r} - \mathbf{Q}_R^\top \mathbf{P}_{\{S'\}} \mathbf{Q}_R\big) = -\sum_{k=1}^{k_r} \log \sin \theta_k(S'),
+\end{align}
+with $v_{\text{logvol}}(\emptyset) = 0$. By Lemma~\ref{lem:block_vol_factorization}, this is again the difference of the log-volumes with and without the response, $\log \operatorname{Vol}(\mathbf{M}_{\{S'\}}) - \log \operatorname{Vol}([\mathbf{M}_{\{S'\}}, \mathbf{Q}_R])$. The Gaussian channel of Theorem~\ref{thm:gaussian_equivalence} extends to a vector-valued response: if $\mathbf{z} \sim \mathcal{N}(\mathbf{0}, \mathbf{I}_d)$, $X_{S'} := \mathbf{M}_{\{S'\}}^\top \mathbf{z}$ and $Y := \mathbf{Q}_R^\top \mathbf{z}$, then $\operatorname{Cov}(Y \mid X_{S'}) = \mathbf{I}_{k_r} - \mathbf{Q}_R^\top \mathbf{P}_{\{S'\}} \mathbf{Q}_R$ and therefore $v_{\text{logvol}}(S') = I(Y; X_{S'})$, the Shannon mutual information between the response and the coalition. Every principal angle contributes additively: a coalition that explains only half of the response directions perfectly still leaves $\sin \theta_k = 1$ for the remaining directions, which do not contribute.
+
+\paragraph{Volume Difference ($v_{\text{vol}}$).}
+With orthonormal player bases $\mathbf{Q}_i$ and response basis $\mathbf{Q}_R$, the analogue of~\eqref{eq:v_vol} is
+\begin{align}\label{eq:set_v_vol}
+    v_{\text{vol}}(S') := \operatorname{Vol}(\mathbf{Q}_{\{S'\}}) - \operatorname{Vol}([\mathbf{Q}_{\{S'\}}, \mathbf{Q}_R]) = \underbrace{\operatorname{Vol}(\mathbf{Q}_{\{S'\}})}_{\text{inter-snippet diversity}} \cdot \Big(1 - \prod_{k=1}^{k_r} \sin \theta_k(S')\Big) \in [0, 1],
+\end{align}
+where $\mathbf{Q}_{\{S'\}} := [\mathbf{Q}_i]_{i \in S'}$ and the factorization follows from Lemma~\ref{lem:block_vol_factorization}. Because the diagonal blocks of $\mathbf{Q}_{\{S'\}}^\top \mathbf{Q}_{\{S'\}}$ are identity matrices, the base volume equals $1$ if the snippet subspaces are mutually orthogonal and shrinks with the cosines of the principal angles between them (for two snippets, $\operatorname{Vol}^2([\mathbf{Q}_i, \mathbf{Q}_j]) = \prod_k \sin^2 \theta_k(\mathcal{U}_i, \mathcal{U}_j)$ by Lemma~\ref{lem:block_vol_factorization}); it therefore penalizes only redundancy \emph{between} snippets. Without orthonormalization, the base volume of a few hundred contextual token embeddings is numerically zero, and $v_{\text{vol}}$ degenerates.
+
+\paragraph{Spectral Entropy ($v_{\text{ent}}$).}
+With orthonormal bases, the density matrix is $\boldsymbol{\rho} := \mathbf{G}^{+}_{\{S'\}} / (\sum_{i \in S'} k_i + k_r)$, and the decoupled reference $\bar{\mathbf{G}}^{+}_{\{S'\}}$ of~\eqref{eq:v_ent} sets the off-diagonal block $\mathbf{C}_{\{S'\}}$ to zero:
+\begin{align}\label{eq:set_v_ent}
+    v_{\text{ent}}(S') := \mathcal{H}\big(\bar{\mathbf{G}}^{+}_{\{S'\}}\big) - \mathcal{H}\big(\mathbf{G}^{+}_{\{S'\}}\big), \qquad
+    \bar{\mathbf{G}}^{+}_{\{S'\}} := \begin{bmatrix} \mathbf{G}_{\{S'\}} & \mathbf{0} \\ \mathbf{0} & \mathbf{I}_{k_r} \end{bmatrix}.
+\end{align}
+The reference is the \emph{pinching} of $\mathbf{G}^{+}_{\{S'\}}$ onto its context and response blocks, which is what keeps $v_{\text{ent}}$ bounded by $\log 2$ independently of the number of vectors (Proposition~\ref{prop:set_values}(iv)).
+
+\begin{proposition}[Properties of the set-valued value functions]\label{prop:set_values}
+\begin{enumerate}
+    \item[(i)] \textbf{Reduction.} For $N_i = N_r = 1$ and unit vectors, \eqref{eq:set_v_logvol}, \eqref{eq:set_v_vol} and~\eqref{eq:set_v_ent} coincide with~\eqref{eq:v_logvol}, \eqref{eq:v_vol} and~\eqref{eq:v_ent}, and $v_{\text{proj}} = 1 - d_{\perp}^2$.
+    \item[(ii)] \textbf{Basis invariance.} $v_{\text{proj}}$ and $v_{\text{logvol}}$ depend on the snippets only through the subspaces $\mathcal{U}_i$; in particular, they are invariant to the order of the tokens and to any invertible reparametrization $\mathbf{M}_i \mapsto \mathbf{M}_i \mathbf{T}_i$.
+    \item[(iii)] \textbf{Monotonicity and non-negative Shapley values.} $v_{\text{proj}}$ and $v_{\text{logvol}}$ are monotone with $v(\emptyset) = 0$. Hence $\phi_i(v) \ge 0$ for all $i$, and $\sum_i \phi_i(v_{\text{proj}}) = v_{\text{proj}}([n]) \le 1$.
+    \item[(iv)] \textbf{Bounded entropy.} $0 \le v_{\text{ent}}(S') \le \log 2$ for every coalition and every number of vectors per player.
+    \item[(v)] \textbf{Sets dominate pooling.} Let $\bar{\mathbf{m}}_i \in \mathcal{U}_i$ be any pooled snippet vector (e.g., a weighted mean of the columns of $\mathbf{M}_i$), and let $v^{\text{pool}}$ denote the value function computed from $\{\bar{\mathbf{m}}_i\}$ with the same response representation. Then $v^{\text{pool}}_{\text{proj}}(S') \le v_{\text{proj}}(S')$ and $v^{\text{pool}}_{\text{logvol}}(S') \le v_{\text{logvol}}(S')$ for all $S'$.
+    \item[(vi)] \textbf{Orthogonal snippets decouple.} If $\mathcal{U}_i \perp \mathcal{U}_j$ for all $i \neq j$, then $v_{\text{proj}}$ is additive, and $\phi_i(v_{\text{proj}}) = v_{\text{proj}}(\{i\})$ in closed form.
+\end{enumerate}
+\end{proposition}
+
+\begin{proof}
+(i) Direct substitution, using Lemma~\ref{lem:vol_factorization}. (ii) $\mathbf{P}_{\{S'\}}$ depends only on $\mathcal{U}_{\{S'\}} = \sum_{i \in S'} \mathcal{U}_i$. (iii) $S' \subseteq T'$ implies $\mathcal{U}_{\{S'\}} \subseteq \mathcal{U}_{\{T'\}}$ and hence $\mathbf{P}_{\{S'\}} \preceq \mathbf{P}_{\{T'\}}$ in the Loewner order. Thus every $\|\mathbf{P}_{\{S'\}} \mathbf{r}_t\|_2^2$ is non-decreasing, and $\mathbf{I} - \mathbf{Q}_R^\top \mathbf{P}_{\{S'\}} \mathbf{Q}_R$ is non-increasing, so its log-determinant is non-increasing. Monotonicity makes all marginal gains, and hence all Shapley values, non-negative; the sum follows from Efficiency. (iv) Let $\boldsymbol{\sigma} := \bar{\mathbf{G}}^{+}_{\{S'\}} / \operatorname{Tr}(\mathbf{G}^{+}_{\{S'\}})$, which has the same trace as $\boldsymbol{\rho}$. With the Hermitian unitary $\mathbf{U} := \operatorname{diag}(\mathbf{I}, -\mathbf{I}_{k_r})$, $\boldsymbol{\sigma} = \frac{1}{2}(\boldsymbol{\rho} + \mathbf{U}\boldsymbol{\rho}\mathbf{U})$. Since $\log \boldsymbol{\sigma}$ is block diagonal and $\boldsymbol{\rho}$, $\boldsymbol{\sigma}$ share their diagonal blocks, $\operatorname{Tr}(\boldsymbol{\rho} \log \boldsymbol{\sigma}) = \operatorname{Tr}(\boldsymbol{\sigma} \log \boldsymbol{\sigma})$ and hence $v_{\text{ent}}(S') = D(\boldsymbol{\rho} \,\|\, \boldsymbol{\sigma}) \ge 0$, as in Proposition~\ref{prop:v_ent}. Moreover, $2\boldsymbol{\sigma} - \boldsymbol{\rho} = \mathbf{U}\boldsymbol{\rho}\mathbf{U} \succeq \mathbf{0}$, i.e., $\boldsymbol{\rho} \preceq 2\boldsymbol{\sigma}$, and the operator monotonicity of the logarithm gives $\log \boldsymbol{\rho} \preceq \log 2 \cdot \mathbf{I} + \log \boldsymbol{\sigma}$ on the support of $\boldsymbol{\rho}$. Taking the trace against $\boldsymbol{\rho} \succeq \mathbf{0}$ yields $D(\boldsymbol{\rho} \,\|\, \boldsymbol{\sigma}) \le \log 2$. (v) $\operatorname{span}\{\bar{\mathbf{m}}_i\}_{i \in S'} \subseteq \mathcal{U}_{\{S'\}}$, so the pooled projection is dominated in the Loewner order; argue as in (iii). (vi) Orthogonality gives $\mathbf{P}_{\{S'\}} = \sum_{i \in S'} \mathbf{P}_i$, so $v_{\text{proj}}(S') = \sum_{i \in S'} v_{\text{proj}}(\{i\})$, and the Shapley value of an additive game is its singleton value.
+\end{proof}
+
+By (v), pooling never explains more of the response than the token sets it was computed from. The difference is largest exactly in the multi-hop setting that motivates attribution: if the response contains one direction from $s_1$ and an orthogonal direction from $s_2$, the pooled vectors only capture the components of these directions that survive averaging, while the token subspaces contain both. By (vi), set-valued Shapley values reduce to a closed-form per-snippet projection when snippets are mutually orthogonal, and they differ from it precisely by how they split credit among overlapping (redundant) snippet subspaces.
+
+\begin{table}[t]
+\centering
+\small
+\renewcommand{\arraystretch}{1.2}
+\begin{tabular}{lcccc}
+\toprule
+\textbf{Value function} & \textbf{Codomain} & \textbf{Monotone} & \textbf{Orthonormal bases} & \textbf{Single-vector case} \\
+\midrule
+$v_{\text{proj}}$ \eqref{eq:v_proj} & $[0, 1]$ & \checkmark & $\times$ & $1 - d_{\perp}^2$ \\
+$v_{\text{logvol}}$ \eqref{eq:set_v_logvol} & $[0, \infty)$ & \checkmark & response only & \eqref{eq:v_logvol} \\
+$v_{\text{vol}}$ \eqref{eq:set_v_vol} & $[0, 1]$ & $\times$ & \checkmark & \eqref{eq:v_vol} \\
+$v_{\text{ent}}$ \eqref{eq:set_v_ent} & $[0, \log 2]$ & $\times$ & \checkmark & \eqref{eq:v_ent} \\
+\bottomrule
+\end{tabular}
+\caption{Set-valued embedding value functions (cf.\ Table~\ref{tab:geom_value_comparison}).}
+\label{tab:set_value_comparison}
+\end{table}
+
+\subsection{Regularization and Effective Rank}
+\label{subsec:set_regularization}
+
+Sets of vectors introduce a degeneracy that does not occur for single vectors. If $N_{\{S'\}} \ge d$, the columns of $\mathbf{M}_{\{S'\}}$ generically span all of $\mathbb{R}^d$; then $\mathbf{P}_{\{S'\}} = \mathbf{I}_d$, every response is fully explained, $v_{\text{logvol}}(S') = \infty$, and the game no longer discriminates between snippets. Even for $N_{\{S'\}} < d$, a long snippet spans many directions that carry little information. We use two remedies, which can be combined.
+
+\paragraph{Ridge (soft) projection.}
+Replacing the projection by the ridge operator $\mathbf{P}^{(\lambda)}_{\{S'\}} := \mathbf{M}_{\{S'\}} (\mathbf{G}_{\{S'\}} + \lambda \mathbf{I})^{-1} \mathbf{M}_{\{S'\}}^\top$, $\lambda > 0$, extends the regularization of Section~\ref{subsec:geometric_values} to sets. By the push-through identity, $\mathbf{I}_d - \mathbf{P}^{(\lambda)}_{\{S'\}} = \lambda (\lambda \mathbf{I}_d + \mathbf{M}_{\{S'\}} \mathbf{M}_{\{S'\}}^\top)^{-1}$, so
+\begin{align}\label{eq:set_logvol_ridge}
+    v^{(\lambda)}_{\text{logvol}}(S') := -\frac{1}{2} \log \det \Big( \lambda \, \mathbf{Q}_R^\top \big(\lambda \mathbf{I}_d + \mathbf{M}_{\{S'\}} \mathbf{M}_{\{S'\}}^\top\big)^{-1} \mathbf{Q}_R \Big) = I\big(Y; X_{S'} + \boldsymbol{\varepsilon}\big), \qquad \boldsymbol{\varepsilon} \sim \mathcal{N}(\mathbf{0}, \lambda \mathbf{I}),
+\end{align}
+i.e., the regularized value is the mutual information between the response and a \emph{noisy} observation of the coalition, and it is finite for every coalition. Directions of $\mathcal{U}_{\{S'\}}$ along which the snippet tokens carry energy well below $\lambda$ contribute little; the number of effectively used directions is $d_{\text{eff}}(\lambda) := \operatorname{Tr}\big(\mathbf{G}_{\{S'\}} (\mathbf{G}_{\{S'\}} + \lambda \mathbf{I})^{-1}\big)$. Since $\mathbf{A} \mapsto \mathbf{A}(\mathbf{A} + \lambda \mathbf{I})^{-1}$ is operator monotone and $\mathbf{M}_{\{S'\}} \mathbf{M}_{\{S'\}}^\top$ grows in the Loewner order with $S'$, both $v^{(\lambda)}_{\text{proj}}$ (defined by~\eqref{eq:v_proj} with $\mathbf{P}^{(\lambda)}$) and $v^{(\lambda)}_{\text{logvol}}$ remain monotone, so Proposition~\ref{prop:set_values}(iii) continues to hold. Both are computed from the block Gram matrix~\eqref{eq:set_gram} alone.
+
+\paragraph{Rank truncation.}
+Alternatively, each player is replaced by the top-$k_i$ left singular vectors $\mathbf{Q}_i$ of $\mathbf{M}_i$, with $k_i$ chosen as the smallest rank that retains a fraction $\eta$ of the energy $\|\mathbf{M}_i\|_F^2$ (and likewise $\mathbf{Q}_R$ for the response). This yields the orthonormal player bases required by $v_{\text{vol}}$ and $v_{\text{ent}}$, makes every coalition evaluation cost $\mathcal{O}\big((\sum_{i \in S'} k_i)^3\big)$ independently of the snippet lengths, and keeps $\sum_i k_i \ll d$. With $k_i = k_r = 1$, it reduces to the single-vector method with the dominant singular vector as the pooled embedding.
+
+\subsection{Application to Transformer Value Vectors (VATT)}
+\label{subsec:vatt}
+
+The attention-Gram constructions of Section~\ref{subsec:two_grams} use the query--key (QK) circuit of the transformer, which determines \emph{where} a response token looks. What is actually moved from the context into the residual stream of the response is determined by the output--value (OV) circuit~\cite{elhage2021mathematical}: in the notation of Section~\ref{subsec:attention_notation}, head $\nu = (l, j)$ writes
+\begin{align}\label{eq:head_output}
+    \mathbf{o}^{\nu}_t = \Big( \sum_{c \le t} a^{\nu}_{t,c} \, \mathbf{v}^{\nu}_c \Big) \mathbf{W}_O^{\nu}, \qquad a^{\nu}_{t,c} := \operatorname{softmax}_{c' \le t}\big(A^{\nu}_{t,c'}\big)_c,
+\end{align}
+into the residual stream of token $t$, where $\mathbf{v}^\nu_c \in \mathbb{R}^{d_v}$ is the $c$-th row of $\mathbf{V}^{(l,j)}$ and $\mathbf{W}_O^{\nu} \in \mathbb{R}^{d_v \times d_{\text{model}}}$ is the slice of $\mathbf{W}_O^{(l)}$ that belongs to head $j$. The value vectors of a snippet are therefore exactly the vectors \emph{from which} the response can read information about that snippet in head $\nu$, and they are a natural set-valued representation of the snippet in the model's own geometry. We call the resulting family \textbf{Value-Subspace Attribution (VATT)}. Throughout, we treat value vectors as row vectors as in Section~\ref{subsec:attention_notation} and identify them with column vectors in $\mathbb{R}^{d_v}$ when forming subspaces.
+
+\paragraph{Context read-out and its exact decomposition.}
+For a response token $t \in \mathcal{T}_r$ and head $\nu$, the \emph{context read-out} and the \emph{contribution of snippet $s_i$} are
+\begin{align}\label{eq:context_readout}
+    \mathbf{y}^{\nu}_t := \sum_{c \in \mathcal{T}_{\text{ctx}}} a^{\nu}_{t,c} \, \mathbf{v}^{\nu}_c = \sum_{i=1}^{n} \mathbf{z}^{\nu}_{t,i}, \qquad \mathbf{z}^{\nu}_{t,i} := \sum_{c \in \mathcal{T}_i} a^{\nu}_{t,c} \, \mathbf{v}^{\nu}_c \in \mathcal{U}^{\nu}_i := \operatorname{span}\{\mathbf{v}^{\nu}_c : c \in \mathcal{T}_i\}.
+\end{align}
+The read-out excludes the prompt, the response itself, and attention sinks such as the BOS token; it is the part of the head's output that originates in the retrieved context. Decomposition~\eqref{eq:context_readout} is exact and linear, and it is the quantity whose norm is used by value-weighted attention attribution~\cite{kobayashi2020attention}. It does not, however, say how to split credit when the snippet subspaces $\mathcal{U}^\nu_i$ overlap, i.e., when two snippets provide the same information. This is what the cooperative game adds.
+
+\paragraph{Players.}
+Fix the global layers $\mathcal{L}_{\text{glob}}$ and let $\mathcal{H} := \mathcal{L}_{\text{glob}} \times [h]$ be the set of $m = |\mathcal{H}|$ heads. Let $\bar{a}^{\nu}_c := \sum_{t \in \mathcal{T}_r} \omega_t \, a^{\nu}_{t,c}$ be the mean attention that context token $c$ receives from the response in head $\nu$. VATT represents
+\begin{itemize}
+    \item each snippet $s_i$, in each head $\nu$, by its \emph{attention-weighted value set} $\hat{\mathbf{V}}^{\nu}_i := \big[ (\bar{a}^{\nu}_c)^{1/2} \mathbf{v}^{\nu}_c \big]_{c \in \mathcal{T}_i} \in \mathbb{R}^{d_v \times N_i}$, and
+    \item the response by its context read-outs $\mathbf{Y}^{\nu} := [\mathbf{y}^{\nu}_t]_{t \in \mathcal{T}_r} \in \mathbb{R}^{d_v \times N_r}$ with weights $\omega_t$.
+\end{itemize}
+The attention weights do not change the span of $\hat{\mathbf{V}}^\nu_i$ except for removing tokens that receive no attention, but under the ridge projection of Section~\ref{subsec:set_regularization} they make the soft subspace concentrate on the few heavily attended \emph{anchor} tokens of each snippet, the set-valued counterpart of the top-$k_0$ anchors of RCB (Section~\ref{subsubsec:rcb}).
+
+\paragraph{Head-wise direct-sum geometry.}
+Each head reads from its own value space, with its own attention coefficients. We therefore combine heads by a direct sum rather than by a common linear span: the coalition subspace is $\mathcal{U}_{\{S'\}} := \bigoplus_{\nu \in \mathcal{H}} \mathcal{U}^{\nu}_{\{S'\}} \subseteq \mathbb{R}^{m d_v}$ with $\mathcal{U}^\nu_{\{S'\}} := \sum_{i \in S'} \mathcal{U}^\nu_i$, whose projection is block diagonal, $\mathbf{P}_{\{S'\}} = \operatorname{blockdiag}_{\nu}(\mathbf{P}^{\nu}_{\{S'\}})$. The projected response energy~\eqref{eq:v_proj} becomes
+\begin{align}\label{eq:vatt_proj}
+    v^{\text{VATT}}_{\text{proj}}(S') := \frac{\sum_{\nu \in \mathcal{H}} \sum_{t \in \mathcal{T}_r} \omega_t \, \big\|\mathbf{P}^{\nu}_{\{S'\}} \mathbf{y}^{\nu}_t\big\|_2^2}{\sum_{\nu \in \mathcal{H}} \sum_{t \in \mathcal{T}_r} \omega_t \, \|\mathbf{y}^{\nu}_t\|_2^2},
+\end{align}
+an energy-weighted average of per-head projected energies, and $v^{\text{VATT}}_{\text{logvol}}$ is defined analogously by summing the per-head log-determinants of~\eqref{eq:set_logvol_ridge}. To measure what is written into the residual stream rather than what is read, one replaces the Euclidean inner product of head $\nu$ by $\langle \mathbf{x}, \mathbf{x}' \rangle_{\nu} := \mathbf{x} \mathbf{W}_O^{\nu} (\mathbf{W}_O^{\nu})^\top \mathbf{x}'^\top$, i.e., works with the OV-transformed vectors $\mathbf{v}^\nu_c \mathbf{W}_O^\nu \in \mathbb{R}^{d_{\text{model}}}$; all formulas remain unchanged because they depend on the vectors only through Gram matrices.
+
+\begin{proposition}[Properties of VATT]\label{prop:vatt}
+Consider $v^{\text{VATT}}_{\text{proj}}$ with exact projections ($\lambda = 0$, no truncation).
+\begin{enumerate}
+    \item[(i)] \textbf{Self-normalization.} $\mathbf{y}^\nu_t \in \mathcal{U}^\nu_{\{[n]\}}$ for all $\nu, t$. Hence $v^{\text{VATT}}_{\text{proj}}([n]) = 1$, and the Shapley vector $\boldsymbol{\phi}(v^{\text{VATT}}_{\text{proj}})$ lies in the simplex $\Delta^{n-1}$ without any link function.
+    \item[(ii)] \textbf{Unattended snippets are null players.} If $a^\nu_{t,c} = 0$ for all $\nu \in \mathcal{H}$, $t \in \mathcal{T}_r$ and $c \in \mathcal{T}_i$, then $\phi_i(v^{\text{VATT}}_{\text{proj}}) = 0$.
+    \item[(iii)] \textbf{Reduction to value-weighted attention norms.} If $\mathcal{U}^\nu_i \perp \mathcal{U}^\nu_{i'}$ for all $\nu$ and $i \neq i'$, then
+    \begin{align}\label{eq:vatt_orthogonal}
+        \phi_i\big(v^{\text{VATT}}_{\text{proj}}\big) = \frac{\sum_{\nu, t} \omega_t \, \|\mathbf{z}^{\nu}_{t,i}\|_2^2}{\sum_{\nu, t} \omega_t \, \|\mathbf{y}^{\nu}_t\|_2^2},
+    \end{align}
+    the (squared) value-weighted attention share of snippet $s_i$~\cite{kobayashi2020attention}.
+\end{enumerate}
+\end{proposition}
+
+\begin{proof}
+(i) By~\eqref{eq:context_readout}, $\mathbf{y}^\nu_t$ is a linear combination of the value vectors of context tokens, all of which lie in $\mathcal{U}^\nu_{\{[n]\}}$. Hence $\mathbf{P}^\nu_{\{[n]\}} \mathbf{y}^\nu_t = \mathbf{y}^\nu_t$ and $v^{\text{VATT}}_{\text{proj}}([n]) = 1$. Since $v^{\text{VATT}}_{\text{proj}}$ is monotone (Proposition~\ref{prop:set_values}(iii), applied head by head), $\phi_i \ge 0$, and Efficiency gives $\sum_i \phi_i = 1$. (ii) The attention weights of all tokens of $s_i$ vanish, so $\hat{\mathbf{V}}^\nu_i = \mathbf{0}$ and $\mathcal{U}^\nu_i = \{\mathbf{0}\}$ in every head. Adding $s_i$ to any coalition does not change any projection, so all marginal gains vanish; apply the Null player axiom. (iii) Orthogonality gives $\mathbf{P}^\nu_{\{S'\}} = \sum_{i \in S'} \mathbf{P}^\nu_i$, and $\mathbf{P}^\nu_i \mathbf{y}^\nu_t = \mathbf{z}^\nu_{t,i}$ because $\mathbf{z}^\nu_{t,i} \in \mathcal{U}^\nu_i$ and $\mathbf{z}^\nu_{t,i'} \perp \mathcal{U}^\nu_i$ for $i' \neq i$. The game is additive with singleton values~\eqref{eq:vatt_orthogonal}, which sum to one by Pythagoras.
+\end{proof}
+
+Property (i) is in contrast to EATT and GATT, whose raw Shapley values must be mapped to the simplex by a link function: tokens that receive no attention contribute no energy. It does not, however, remove the background floor of Section~\ref{subsec:contrast_calibration}: value directions shared by all snippets (format, entities mentioned in the question) are redundant, and the Shapley value splits their energy evenly, so distractors still receive a common offset (Section~\ref{subsec:exp_values}). Property (iii) shows that VATT strictly generalizes value-norm attribution. It agrees with it when the snippets write into orthogonal value directions, and it departs from it exactly when two snippets offer the same information, in which case the Shapley value splits the credit between them instead of counting it twice. In practice, the exact projection is degenerate in each head as soon as $N_{\{S'\}} \ge d_v$ (Section~\ref{subsec:set_regularization}), so we use the ridge projection on the attention-weighted value sets or truncate each $\hat{\mathbf{V}}^\nu_i$ to rank $k_i \ll d_v$. Property (ii) holds verbatim under both, and Property (i) holds up to a factor $v^{\text{VATT}}_{\text{proj}}([n]) \le 1$ that is removed by the scale-invariant rectified link.
+
+\paragraph{Algorithm.}
+VATT follows the GATT pipeline of Section~\ref{subsec:gatt_pipeline}.
+\begin{enumerate}
+    \item \textbf{Forward pass.} In one teacher-forced pass on $(p, S, r)$ (which can be the generation pass), cache, for every global head $\nu$, the value vectors $\mathbf{v}^\nu_c$ of the context tokens and the attention rows $(a^\nu_{t,c})_{c \in \mathcal{T}_{\text{ctx}}}$ of the response tokens.
+    \item \textbf{Player subspaces.} Form $\hat{\mathbf{V}}^\nu_i$ and $\mathbf{Y}^\nu$. Either keep the token-level Gram blocks $\hat{\mathbf{V}}^{\nu\top}_i \hat{\mathbf{V}}^\nu_{i'}$ and $\hat{\mathbf{V}}^{\nu\top}_i \mathbf{Y}^\nu$ (ridge variant), or compute rank-$k_i$ orthonormal bases $\mathbf{Q}^\nu_i$ by a thin SVD (truncated variant).
+    \item \textbf{Shapley values.} Evaluate $v^{\text{VATT}}$ on coalitions and compute exact Shapley values by enumerating all $2^n$ coalitions, or estimate them with $K$ random permutations (Lemma~\ref{lemma:unbiased_estimator}). In the truncated variant, each coalition evaluation costs $\mathcal{O}\big(m (\sum_{i \in S'} k_i)^2 (d_v + N_r)\big)$.
+    \item \textbf{Global weight.} Scale by $w$, which requires the shared empty-context pass.
+\end{enumerate}
+As GATT, VATT therefore needs two forward passes in total, independently of $n$ and of the number of permutations. A cheaper \emph{pooled} variant (\textbf{VATT-pool}) represents snippet $s_i$ by the single vector $\bar{\mathbf{z}}_i := \operatorname{stack}_{\nu}\big(\sum_t \omega_t \mathbf{z}^\nu_{t,i}\big)$ and the response by $\bar{\mathbf{y}} := \sum_i \bar{\mathbf{z}}_i$, and plugs the resulting $(n+1) \times (n+1)$ Gram matrix into the value functions of Section~\ref{subsec:geometric_values}. Since $\bar{\mathbf{y}}$ lies in the span of the $\bar{\mathbf{z}}_i$, $v_{\text{logvol}}([n]) = \infty$ and the regularized form~\eqref{eq:marginal_sherman} must be used, as for TCR (Proposition~\ref{prop:tcr}).
+
+\begin{remark}[Relation to GATT and limitations]\label{rem:vatt_limitations}
+RCB and TCR describe the QK circuit, i.e., \emph{which} snippet tokens the response attends to; VATT describes the OV circuit, i.e., \emph{what} the attended tokens contribute, and measures redundancy by overlapping value subspaces rather than by similar keys or co-activated heads. A snippet can be attended without contributing (e.g., when the response verifies and rejects it), in which case its read-out has small norm or points away from the response representation, and VATT assigns less credit than attention-weight heuristics. Three limitations remain. First, the value vector of a context token at layer $l$ is computed from its residual stream, which already mixes information from earlier tokens, including other snippets; VATT attributes what is read \emph{at} the snippet positions, a limitation shared with all single-layer attention attributions~\cite{abnar2020quantifying}. Second, VATT ignores information that reaches the response through local (sliding-window) attention layers or that is first written into the prompt or response positions and read later. Third, the read-out is computed from the post-softmax weights of the actual forward pass, so VATT explains the observed routing, not the counterfactual effect of removing a snippet, which the likelihood game $v_{\text{LL}}$ measures.
+\end{remark}
+
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\section{Relation to Various Approaches}
+
+\subsection{Connecting Log-Volume to the Log-Likelihood Value Function}
+\label{subsec:logvol_to_llh}
+
+We now establish the mathematical connection between the geometric log-volume value function $v_{\text{logvol}}$ and the canonical log-likelihood value function $v_{\text{LL}}$ defined in Section~\ref{sec:llh_shapley}. We provide two complementary bridges: an exact information-theoretic formulation via Gaussian surrogates, and a scale-invariance theorem under geometric power-law likelihoods.
+
+\paragraph{1. The Gaussian Process Channel Surrogate.}
+Because the full $(n+1) \times (n+1)$ Gram matrix $\mathbf{G}^{+}_{\{[n]\}}$ is positive semidefinite with unit diagonal, it defines a valid covariance matrix for a zero-mean multivariate Gaussian vector $(X_1, \dots, X_n, Y) \sim \mathcal{N}(\mathbf{0}, \mathbf{G}^{+}_{\{[n]\}})$, where variables $X_i$ represent the retrieved context snippets and $Y$ represents the generated response $r$, with $\operatorname{Var}(Y) = 1$ and $\operatorname{Cov}(X_i, Y) = \langle \mathbf{m}_i, \mathbf{r} \rangle$.
+
+Under this Gaussian statistical manifold, observing context subset $S'$ updates the conditional distribution of the response to $Y \mid X_{S'} \sim \mathcal{N}(\mu_{S'}, \sigma^2_{S'})$. By standard Gaussian conditioning:
+\begin{align}
+    \sigma^2_{S'} = \operatorname{Var}(Y) - \mathbf{g}_{\{S'\}}^\top \mathbf{G}_{\{S'\}}^{-1} \mathbf{g}_{\{S'\}} = 1 - \mathbf{r}^\top \mathbf{P}_{\{S'\}} \mathbf{r} = d_{\perp}^2(\mathbf{r}, \mathcal{U}_{\{S'\}}).
+\end{align}
+We define the surrogate log-likelihood value function as the expected log-likelihood gain (or differential entropy reduction) under this Gaussian channel:
+\begin{align}
+    v_{\mathcal{N}}(S') := \mathbb{E}\big[\log p(Y \mid X_{S'})\big] - \mathbb{E}\big[\log p(Y)\big].
+\end{align}
+
+\begin{theorem}[Information-Theoretic Equivalence]\label{thm:gaussian_equivalence}
+For every context subset $S' \subseteq [n]$, the Gaussian log-likelihood gain is strictly identical to the Shannon mutual information, which matches the geometric log-volume value function:
+\begin{align}
+    v_{\mathcal{N}}(S') = I(Y; X_{S'}) = -\log d_{\perp}(\mathbf{r}, \mathcal{U}_{\{S'\}}) = v_{\text{logvol}}(S').
+\end{align}
+\end{theorem}
+
+\begin{proof}
+The differential entropy of a scalar Gaussian is $h(Z) = \frac{1}{2}\log(2\pi e \operatorname{Var}(Z))$. Therefore:
+\begin{align*}
+    v_{\mathcal{N}}(S') &= h(Y) - h(Y \mid X_{S'}) \\
+    &= I(Y; X_{S'}) \\
+    &= \frac{1}{2}\log(2\pi e) - \frac{1}{2}\log(2\pi e \, \sigma^2_{S'}) \\
+    &= -\frac{1}{2}\log\big(d_{\perp}^2(\mathbf{r}, \mathcal{U}_{\{S'\}})\big) \\
+    &= -\log d_{\perp}(\mathbf{r}, \mathcal{U}_{\{S'\}}) \\
+    &= v_{\text{logvol}}(S').
+\end{align*}
+\end{proof}
+
+\paragraph{2. Equivalence Under Power-Law Likelihoods.}
+In general language models, context snippets supply factual evidence that sharpens token distributions. We formalize this relationship through a geometric likelihood ratio condition.
+
+\begin{condition}[Geometric Likelihood Ratio]\label{cond:geometric_lr}
+There exists a prompt- and response-dependent constant $\beta > 0$ such that for all coalitions $S' \subseteq [n]$, the conditional response likelihood scales inversely with the unexplained orthogonal residual:
+\begin{align}\label{eq:geometric_lr}
+    \frac{P(r \mid p, S')}{P(r \mid p, \emptyset)} = \big(d_{\perp}(\mathbf{r}, \mathcal{U}_{\{S'\}})\big)^{-\beta}.
+\end{align}
+\end{condition}
+
+Condition~\ref{cond:geometric_lr} states that the more completely the context subspace spans the response embedding ($d_{\perp} \to 0$), the higher the conditional likelihood of generating $r$.
+
+\begin{theorem}[Attribution Invariance Theorem]\label{thm:logvol_llh_equivalence}
+Under Condition~\ref{cond:geometric_lr}, the log-likelihood characteristic function satisfies $v_{\text{LL}}(S') = \beta \cdot v_{\text{logvol}}(S')$ for all $S' \subseteq [n]$. Consequently, for any scale-invariant link function $g$ satisfying property (P3) (including the rectified normalization of \cite{nematov2025source}), the resulting normalized attribution vectors are strictly identical:
+\begin{align}
+    \boldsymbol{\alpha}(v_{\text{LL}}) = \boldsymbol{\alpha}(v_{\text{logvol}}).
+\end{align}
+\end{theorem}
+
+\begin{proof}
+Taking the natural logarithm of both sides of Equation~\eqref{eq:geometric_lr} yields:
+\begin{align*}
+    v_{\text{LL}}(S') = \log P(r \mid p, S') - \log P(r \mid p, \emptyset) = -\beta \log d_{\perp}(\mathbf{r}, \mathcal{U}_{\{S'\}}) = \beta \cdot v_{\text{logvol}}(S').
+\end{align*}
+By the Linearity axiom of Shapley values, scaling the characteristic function by $\beta > 0$ scales the raw Shapley vector by the exact same scalar: $\boldsymbol{\phi}(v_{\text{LL}}) = \beta \cdot \boldsymbol{\phi}(v_{\text{logvol}})$. Applying any link function $g$ that satisfies scale invariance $g(c\boldsymbol{\phi}) = g(\boldsymbol{\phi})$ for $c > 0$ yields:
+\begin{align*}
+    g\big(\boldsymbol{\phi}(v_{\text{LL}})\big) = g\big(\beta \cdot \boldsymbol{\phi}(v_{\text{logvol}})\big) = g\big(\boldsymbol{\phi}(v_{\text{logvol}})\big).
+\end{align*}
+Since both methods share the identical global context scaling factor $w$, the final attributions $\boldsymbol{\alpha} = w \cdot g(\boldsymbol{\phi})$ coincide identically.
+\end{proof}
+
+\begin{proposition}[Robustness Under Approximate Alignment]\label{prop:approx_equivalence}
+Assume $d_{\perp}(\mathbf{r}, \mathcal{U}_{\{[n]\}}) > 0$ (which holds generically when $n < d$). If the empirical log-likelihood aligns with the geometric log-volume up to uniform error $\varepsilon \ge 0$, such that $|v_{\text{LL}}(S') - \beta \cdot v_{\text{logvol}}(S')| \le \varepsilon$ for all $S' \subseteq [n]$, then the raw Shapley vectors satisfy:
+\begin{align}
+    \big\| \boldsymbol{\phi}(v_{\text{LL}}) - \beta \cdot \boldsymbol{\phi}(v_{\text{logvol}}) \big\|_\infty \le 2\varepsilon.
+\end{align}
+\end{proposition}
+
+\begin{proof}
+Let $e(S') := v_{\text{LL}}(S') - \beta v_{\text{logvol}}(S')$, with $e(\emptyset) = 0$ and $|e(S')| \le \varepsilon$. By linearity, $\phi_i(v_{\text{LL}}) - \beta \phi_i(v_{\text{logvol}}) = \phi_i(e)$. The marginal gains satisfy $|\Delta e(S', i)| \le |e(S' \cup \{i\})| + |e(S')| \le 2\varepsilon$. Because the Shapley value is a convex combination of marginal gains with weights summing to unity, $|\phi_i(e)| \le 2\varepsilon$ for all $i \in [n]$.
+\end{proof}
+
+\begin{remark}[Why Determinantal Point Processes (DPPs) Invert the Attribution Polarity]
+In prior exploratory drafts, it was conjectured that modeling sequence likelihoods via a Determinantal Point Process (DPP) where $P(r, S' \mid p) \propto \det(\mathbf{G}^{+}_{\{S'\}})$ could justify geometric attribution. However, by Lemma~\ref{lem:vol_factorization}, this DPP assumption yields:
+\begin{align}
+    P(r \mid p, S') = \frac{\det(\mathbf{G}^{+}_{\{S'\}})}{\det(\mathbf{G}_{\{S'\}})} = d_{\perp}^2(\mathbf{r}, \mathcal{U}_{\{S'\}}),
+\end{align}
+which corresponds to Condition~\ref{cond:geometric_lr} with $\beta = -2 < 0$. Because DPPs are intrinsically \emph{repulsive} point processes that penalize proximity, this model dictates that the more closely the context spans the response, the \emph{less} likely the response becomes. Under this inverted sign, $v_{\text{LL}} = -2 v_{\text{logvol}} \le 0$, resulting in non-positive marginal gains that cause rectified normalization schemes to collapse to zero credit. The attractive power-law scaling ($\beta > 0$) formalized in Condition~\ref{cond:geometric_lr} and Theorem~\ref{thm:gaussian_equivalence} correctly captures the cooperative mechanics of Retrieval-Augmented Generation.
+\end{remark}
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+
+\subsection{Gradient View}
+\label{subsec:gradient_view}
+
+Attention-based attributions are often motivated by the fact that attention weights also govern the flow of gradients during training. In this subsection, we make this connection precise. We show which part of the gradient the GATT constructions of Section~\ref{subsec:two_grams} capture, which part they discard, and how gradients relate to Shapley values.
+
+\paragraph{Attention weights and head outputs.}
+We use the notation of Section~\ref{subsec:attention_notation}. For layer $l$, head $j$ and position $t$, let $a^{(l,j)}_{t,c} := \operatorname{softmax}_{c \le t}\big(A^{(l,j)}_{t,c}\big)$ denote the post-softmax attention weights, $\mathbf{v}^{(l,j)}_c$ the rows of $\mathbf{V}^{(l,j)}$, and $\mathbf{o}^{(l,j)}_t := \sum_{c \le t} a^{(l,j)}_{t,c} \mathbf{v}^{(l,j)}_c$ the head output. When the layer and head are clear from the context, we drop the superscript $(l,j)$.
+
+\paragraph{Snippet gates.}
+To differentiate with respect to a snippet, we attach a gate $z_i \in [0,1]$ to each snippet $s_i$, which acts as a dimmer on everything that later tokens read from $s_i$ (Figure~\ref{fig:snippet_gate}). Formally, let $\mathcal{R}_i := \{(t,c) : c \in \mathcal{T}_i,\ t \notin \mathcal{T}_i,\ c < t\}$ be the (query, key) pairs through which tokens outside $s_i$ read from $s_i$. In every layer and head, we replace $A^{(l,j)}_{t,c}$ by $A^{(l,j)}_{t,c} + \log z_i$ for $(t,c) \in \mathcal{R}_i$. Equivalently, the unnormalized attention $e^{A_{t,c}}$ to every token of $s_i$ is multiplied by $z_i$ before the row is renormalized (Figure~\ref{fig:snippet_gate}(c)). Reads by response tokens are \emph{direct}. Reads by later snippets are \emph{indirect}, since they can carry information from $s_i$ to the response in several hops. Reads within $s_i$ and the masked anti-causal entries are not affected. Setting $z_i = 1$ recovers the original model, and setting $z_i = 0$ removes $s_i$ from every attention row, i.e., it knocks out the snippet~\cite{geva2023dissecting}. Unlike deleting $s_i$ from the prompt, the gate leaves all token positions, and hence all positional encodings, unchanged, and it is differentiable in $z_i$. Let
+\begin{align}
+    F(\mathbf{z}) := \log P_{\mathbf{z}}(r \mid p, S)
+\end{align}
+be the teacher-forced log-likelihood of the response under gates $\mathbf{z} \in [0,1]^n$, so that $F(\mathbf{1}) = \log P(r \mid p, S)$. The gradient $\partial F / \partial z_i$ at $\mathbf{z} = \mathbf{1}$ is the slope of $F$ at full context. The \emph{knockout game} $v_{\text{ko}}(S') := F(\mathbf{1}_{S'}) - F(\mathbf{0})$, where $\mathbf{1}_{S'}$ is the indicator vector of $S'$, measures finite drops instead (Figure~\ref{fig:snippet_gate}(d)). Since the input sequence is fixed and only the gates vary, $v_{\text{ko}}$ is a genuine set function.
+
+\begin{figure}[t]
+\centering
+\resizebox{\linewidth}{!}{%
+\begin{tikzpicture}[font=\scriptsize, >=latex]
+% ================= (a) token sequence =================
+\begin{scope}
+    \foreach \x/\w/\lab/\col in {0/1.0/p/gray!20, 1.2/1.3/s_1/blue!20, 2.7/1.3/s_2/orange!35, 4.2/1.3/s_3/green!25, 5.7/1.5/r/gray!35}{
+        \fill[\col] (\x,0) rectangle ++(\w,0.5);
+        \draw (\x,0) rectangle ++(\w,0.5);
+        \node at ({\x+\w/2},0.25) {$\lab$};
+    }
+    % ungated read: response reads s_1
+    \draw[->, gray] (6.1,0.5) to[out=140,in=40] node[pos=0.5, above] {not gated} (1.85,0.5);
+    % direct gated read: response reads s_2
+    \draw[->, thick, orange!80!black] (6.7,0.5) to[out=110,in=70]
+        node[pos=0.5, circle, draw, fill=white, inner sep=1pt] {$\times z_2$} (3.35,0.5);
+    % indirect gated read: s_3 reads s_2
+    \draw[->, thick, dashed, orange!80!black] (4.85,0) to[out=-110,in=-70]
+        node[pos=0.5, circle, draw, fill=white, inner sep=1pt] {$\times z_2$} (3.35,0);
+    \node[anchor=west, orange!80!black] at (5.6,-0.45) {indirect: $s_3$ reads $s_2$};
+    \node[anchor=west, orange!80!black] at (5.6,1.35) {direct: $r$ reads $s_2$};
+    \node at (3.6,-1.4) {(a) The gate $z_2$ dims every read from $s_2$ by a later token};
+\end{scope}
+
+% ================= (b) attention matrix =================
+\begin{scope}[shift={(9.2,-1.2)}, scale=0.55]
+    \fill[red!6]   (0,6) -- (6,6) -- (6,0) -- cycle;
+    \fill[gray!12] (0,6) -- (0,0) -- (6,0) -- cycle;
+    \fill[orange!45] (2.0,0) rectangle (3.2,2.8);
+    \foreach \x in {0.8,2.0,3.2,4.4} { \draw[gray!60] (\x,0) -- (\x,6); }
+    \foreach \y in {5.2,4.0,2.8,1.6} { \draw[gray!60] (0,\y) -- (6,\y); }
+    \draw[thick] (0,0) rectangle (6,6);
+    \draw[gray] (0,6) -- (6,0);
+    \node at (0.4,6.35) {$p$};   \node at (1.4,6.35) {$s_1$}; \node at (2.6,6.35) {$s_2$};
+    \node at (3.8,6.35) {$s_3$}; \node at (5.2,6.35) {$r$};
+    \node at (-0.4,5.6) {$p$};   \node at (-0.4,4.6) {$s_1$}; \node at (-0.4,3.4) {$s_2$};
+    \node at (-0.4,2.2) {$s_3$}; \node at (-0.4,0.8) {$r$};
+    \node at (3,7.0) {keys $c$ (read)};
+    \node[rotate=90] at (-1.1,3) {queries $t$ (reader)};
+    \node[fill=white, inner sep=1pt, rounded corners] at (2.6,1.4) {$+\log z_2$};
+    \node[anchor=west] at (6.1,2.2) {indirect rows};
+    \node[anchor=west] at (6.1,0.8) {direct rows};
+    \node at (3,-0.65) {(b) Gated logits $\mathcal{R}_2$ in $\mathbf{A}^{(l,j)}$ (all layers, heads)};
+\end{scope}
+
+% ================= (c) one attention row =================
+\begin{scope}[shift={(0,-5.2)}]
+    \foreach \cx/\z/\a/\b/\c/\d/\t in {0/1/0.375/0.75/1.5/0.375/0.50, 2.6/0.5/0.5/1.0/1.0/0.5/0.33, 5.2/0/0.75/1.5/0/0.75/0}{
+        \draw (\cx-0.1,0) -- (\cx+1.95,0);
+        \fill[gray!40]   (\cx,0)      rectangle ++(0.35,\a);
+        \fill[blue!35]   (\cx+0.5,0)  rectangle ++(0.35,\b);
+        \fill[orange!60] (\cx+1.0,0)  rectangle ++(0.35,\c);
+        \fill[green!40]  (\cx+1.5,0)  rectangle ++(0.35,\d);
+        \node at ({\cx+0.175},-0.2) {$p$};
+        \node at ({\cx+0.675},-0.2) {$s_1$};
+        \node at ({\cx+1.175},-0.2) {$s_2$};
+        \node at ({\cx+1.675},-0.2) {$s_3$};
+        \node[orange!80!black] at ({\cx+1.175},{\c+0.15}) {\t};
+        \node at ({\cx+0.92},1.9) {$z_2 = \z$};
+    }
+    \node at (3.6,-0.75) {(c) One attention row of a response token: $e^{A_{t,c}}$ on $s_2$ is multiplied by $z_2$, then renormalized};
+\end{scope}
+
+% ================= (d) gradient vs. knockout =================
+\begin{scope}[shift={(9.2,-5.4)}]
+    \draw[->] (0,0) -- (3.6,0) node[right] {$z_2$};
+    \draw[->] (0,0) -- (0,2.4) node[above] {$F(z_2)$};
+    \draw[thick, domain=0:1, samples=40, smooth] plot ({3*\x},{0.3+1.6*(1-(1-\x)^3)});
+    \draw (0,0.05) -- (0,-0.05) node[below, align=center] {$0$\\knockout};
+    \draw (3,0.05) -- (3,-0.05) node[below, align=center] {$1$\\full context};
+    \draw[dashed, blue!70!black, thick] (0,0.3) -- (3,1.9);
+    \draw[dotted] (0,0.3) -- (3.3,0.3);
+    \draw[<->, blue!70!black] (3.3,0.3) -- (3.3,1.85) node[midway, right, align=left] {drop\\$F(1)-F(0)$};
+    \draw[red!70!black, very thick] (2.3,1.9) -- (3.6,1.9);
+    \node[red!70!black, above] at (2.6,1.95) {slope $= \partial F/\partial z_2 \approx 0$};
+    \fill (0,0.3) circle (1.5pt);
+    \fill (3,1.9) circle (1.5pt);
+    \node at (1.7,-1.0) {(d) Gradient (slope at $1$) vs.\ knockout (drop)};
+\end{scope}
+\end{tikzpicture}%
+}
+\caption{The snippet gate $z_2$, illustrated for $n = 3$. (a)~The gate multiplies every read from $s_2$ by a later token: directly by the response, and indirectly by later snippets. Reads from other snippets are not affected. (b)~In the logit matrix of every layer and head, the gated entries form the block $\mathcal{R}_2$ (orange) below the diagonal, to which $\log z_2$ is added. The block of $s_2$ reading itself and the masked upper triangle are unchanged. (c)~Effect on one attention row: the share of $s_2$ shrinks as $z_2$ decreases and vanishes at $z_2 = 0$, and the freed mass is redistributed to the other tokens. (d)~The log-likelihood $F(z_2)$ along the gate. The gradient is the slope at full context, which can be close to zero when the model already predicts the response confidently (saturation), even though knocking out $s_2$ causes a large drop. Shapley values of the knockout game average such finite drops over coalitions.}
+\label{fig:snippet_gate}
+\end{figure}
+
+
+\paragraph{The attention gradient.}
+The following identities are standard consequences of the chain rule and softmax shift invariance.
+
+\begin{lemma}[Gradients through one attention row]\label{lem:attn_grad}
+Let $F$ depend on the head output $\mathbf{o}_t$, and let $\boldsymbol{\delta}_t := \partial F / \partial \mathbf{o}_t$. Then, considering only the dependence through row $t$:
+\begin{enumerate}
+    \item[(i)] $\dfrac{\partial F}{\partial A_{t,c}} = a_{t,c}\, \langle \mathbf{v}_c - \mathbf{o}_t, \boldsymbol{\delta}_t \rangle = a_{t,c} \Big( \dfrac{\partial F}{\partial a_{t,c}} - \sum_{c' \le t} a_{t,c'} \dfrac{\partial F}{\partial a_{t,c'}} \Big)$;
+    \item[(ii)] $\sum_{c \le t} \partial F / \partial A_{t,c} = 0$;
+    \item[(iii)] $\nabla_{\mathbf{q}_t} F = \frac{1}{\sqrt{d_k}} \sum_{c \le t} \frac{\partial F}{\partial A_{t,c}} \big( \mathbf{k}_c - \bar{\mathbf{k}} \big)$ for \emph{every} vector $\bar{\mathbf{k}} \in \mathbb{R}^{d_k}$;
+    \item[(iv)] $\nabla_{\mathbf{v}_c} F = a_{t,c}\, \boldsymbol{\delta}_t$.
+\end{enumerate}
+\end{lemma}
+
+\begin{proof}
+Treating the attention weights as free variables gives $\partial F / \partial a_{t,c} = \langle \mathbf{v}_c, \boldsymbol{\delta}_t \rangle$. The softmax Jacobian is $\partial a_{t,c'} / \partial A_{t,c} = a_{t,c'}(\mathbb{1}[c = c'] - a_{t,c})$, which gives (i). Summing (i) over $c$ gives $\langle \mathbf{o}_t - \mathbf{o}_t, \boldsymbol{\delta}_t \rangle = 0$, which is (ii). For (iii), $\partial A_{t,c} / \partial \mathbf{q}_t = \mathbf{k}_c / \sqrt{d_k}$, and by (ii), subtracting any constant vector $\bar{\mathbf{k}}$ does not change the sum. (iv) follows from $\mathbf{o}_t = \sum_c a_{t,c} \mathbf{v}_c$.
+\end{proof}
+
+Identity (i) shows that the logit gradient is the attention $\times$ gradient product used in gradient-weighted attention maps~\cite{chefer2021transformer}, \emph{centered} over the row. Identity (iii) is the gradient counterpart of Proposition~\ref{prop:rcb}(ii): the query gradient is insensitive to a common shift of the keys, so centering keys, as in RCB, loses no gradient information.
+
+\begin{proposition}[Snippet gradient]\label{prop:snippet_gradient}
+The derivative of the log-likelihood with respect to the gate of snippet $s_i$ at full context is
+\begin{align}\label{eq:snippet_gradient}
+    \eta_i := \frac{\partial F}{\partial z_i}\Big|_{\mathbf{z} = \mathbf{1}} = \sum_{l=1}^{L} \sum_{j=1}^{h} \sum_{(t,c) \in \mathcal{R}_i} \underbrace{a^{(l,j)}_{t,c}}_{\text{routing}} \, \underbrace{\big\langle \mathbf{v}^{(l,j)}_c - \mathbf{o}^{(l,j)}_t, \boldsymbol{\delta}^{(l,j)}_t \big\rangle}_{\text{value--error alignment}},
+\end{align}
+where $\boldsymbol{\delta}^{(l,j)}_t := \partial F / \partial \mathbf{o}^{(l,j)}_t$. It splits into a \emph{direct} part $\eta_i^{\text{dir}}$, collecting the response rows $t \in \mathcal{T}_r$, and an \emph{indirect} part $\eta_i^{\text{ind}}$, collecting the rows of later context tokens, through which information from $s_i$ reaches the response in several hops.
+\end{proposition}
+
+\begin{proof}
+At $\mathbf{z} = \mathbf{1}$, $\partial / \partial z_i = \partial / \partial \log z_i$. The gate $\log z_i$ enters additively into $A^{(l,j)}_{t,c}$ for every $(l,j)$ and every $(t,c) \in \mathcal{R}_i$. By the multivariable chain rule, $\eta_i$ is the sum of $\partial F / \partial A^{(l,j)}_{t,c}$ over these entries, each given by Lemma~\ref{lem:attn_grad}(i).
+\end{proof}
+
+\paragraph{Gradients versus Shapley values.}
+Shapley values are themselves integrated gradients, but of a different function and along a full path rather than at a single point. Let 
+\begin{align}
+    \tilde{v}(\mathbf{x}) := \sum_{S' \subseteq [n]} v(S') \prod_{i \in S'} x_i \prod_{i \notin S'} (1 - x_i)
+\end{align} be the multilinear extension of a game $v$ to $[0,1]^n$.
+
+\begin{proposition}[Shapley values as integrated gradients~\cite{owen1972multilinear}]\label{prop:owen}
+For every game $v$ and every $i \in [n]$,
+\begin{align}
+    \phi_i(v) = \int_0^1 \frac{\partial \tilde{v}}{\partial x_i}(s, \dots, s)\, ds.
+\end{align}
+Consequently, if $F$ is affine on $[0,1]^n$, then $\eta_i = \phi_i(v_{\text{ko}})$ for all $i$.
+\end{proposition}
+
+\begin{proof}
+$\partial \tilde{v} / \partial x_i (s\mathbf{1}) = \sum_{S' \subseteq [n] \setminus \{i\}} s^{|S'|} (1-s)^{n - 1 - |S'|} \Delta v(S', i)$, and $\int_0^1 s^k (1-s)^{n-1-k} ds = k!(n-1-k)!/n!$, which gives~\eqref{eq:shapley_def}. If $F$ is affine, then $F - F(\mathbf{0})$ is multilinear and agrees with $v_{\text{ko}}$ on the vertices of $[0,1]^n$. Hence it equals $\tilde{v}_{\text{ko}}$, whose partial derivatives are constant and equal to $\eta_i$.
+\end{proof}
+
+The snippet gradient $\eta$ and the Shapley value $\boldsymbol{\phi}(v_{\text{ko}})$ therefore differ in two ways. First, $\eta$ is the derivative of the model's own gate extension $F$ at the single point $\mathbf{z} = \mathbf{1}$, whereas $\boldsymbol{\phi}$ averages the derivative of the multilinear extension over the diagonal. The two coincide only if the game has no interactions, so redundancy and complementarity are exactly what first-order attribution misses. Second, gradients \emph{saturate}~\cite{sundararajan2017axiomatic}. The error signal $\boldsymbol{\delta}_t$ is propagated from the output errors $\mathbf{e}_{y_s} - P(\cdot \mid p, S, r_{1:s-1})$ of the response tokens $s \ge t$, whose $\ell_1$-norm is $2(1 - P(y_s \mid p, S, r_{1:s-1}))$. If the model predicts every response token with probability close to one, as is typical for responses it generated itself, then $\eta_i \approx 0$ for every snippet. Removing all snippets, however, may still decrease the likelihood substantially, i.e., $v_{\text{ko}}([n]) \gg 0$. Shapley values are averages of finite differences and do not suffer from this saturation.
+
+\paragraph{What the attention Gram matrices measure.}
+By~\eqref{eq:snippet_gradient}, the direct snippet gradient is a sum of products of a routing factor $a_{t,c}$ and a value--error alignment $\langle \mathbf{v}_c - \mathbf{o}_t, \boldsymbol{\delta}_t \rangle$. Post-softmax attention attributions keep only the routing factor. The following proposition shows that the same holds for both GATT constructions, in log scale.
+
+\begin{proposition}[GATT measures log-routing]\label{prop:gatt_log_routing}
+For every layer $l$, head $j$, response token $t \in \mathcal{T}_r$ and context tokens $c, c' \in \mathcal{T}_{\text{ctx}}$, we have $A^{(l,j)}_{t,c} - A^{(l,j)}_{t,c'} = \log a^{(l,j)}_{t,c} - \log a^{(l,j)}_{t,c'}$. Consequently:
+\begin{enumerate}
+    \item[(i)] The unnormalized RCB relevance~\eqref{eq:rcb_block_logit} equals
+    \begin{align}
+        \sqrt{d_k}\, \operatorname*{mean}_{t \in \mathcal{T}_r} \Big( \operatorname*{mean}_{c \in \mathcal{T}_i^{\text{top}}} \log a^{(l,j)}_{t,c} - \operatorname*{mean}_{c \in \mathcal{T}_{\text{ctx}}} \log a^{(l,j)}_{t,c} \Big),
+    \end{align}
+    the log-ratio of the geometric-mean attention to the anchor tokens of $s_i$ and to the whole context.
+    \item[(ii)] The TCR profile entries are log-excess attention, $f_i(l,j,t) = \frac{1}{k_0} \sum_{c \in \mathcal{T}_i^{\text{top}}(l,j,t)} \big( \log a^{(l,j)}_{t,c} - \log a^{\star}_{l,j,t} \big)^+$, where $a^{\star}_{l,j,t}$ is the attention weight corresponding to the threshold logit $\tau_{l,j,t}$.
+\end{enumerate}
+\end{proposition}
+
+\begin{proof}
+$\log a_{t,c} = A_{t,c} - \log \sum_{c' \le t} e^{A_{t,c'}}$, and the log-partition function is common to all entries of row $t$, so it cancels in differences. Both statements follow by substituting this into~\eqref{eq:rcb_block_logit} and into the definition of $f_i$.
+\end{proof}
+
+Both constructions are invariant to row-common shifts, consistent with the zero-sum property of Lemma~\ref{lem:attn_grad}(ii). Gradients, too, only see attention \emph{relative} to the rest of the row. What both constructions discard is the value--error alignment, which has two consequences.
+\begin{itemize}
+    \item \textbf{Value content.} The alignment can be split as $\langle \mathbf{v}_c, \boldsymbol{\delta}_t \rangle - \langle \mathbf{o}_t, \boldsymbol{\delta}_t \rangle$. The first term is the direct contribution of token $c$. It is small for sink tokens, which attract attention but have value vectors of small norm~\cite{kobayashi2020attention, xiao2024efficient}. The second term is common to the row and scales with attention mass. Routing-only measures cannot separate content from this common term, and the centering in RCB and the thresholding in TCR are partial remedies.
+    \item \textbf{Prediction error.} Response tokens that the model predicts confidently induce small gradients but count fully in the uniform averages over $t \in \mathcal{T}_r$ used by RCB and TCR.
+\end{itemize}
+In exchange, GATT replaces the first-order, additive structure of~\eqref{eq:snippet_gradient} with a cooperative game. Redundant snippets share credit and complementary snippets are both credited, which no single gradient can express (Proposition~\ref{prop:owen}). GATT also uses only the direct rows $t \in \mathcal{T}_r$, so indirect routing through later context tokens ($\eta_i^{\text{ind}}$) is not captured.
+
+\begin{remark}[Error-weighted variants]\label{rem:error_weighted}
+The analysis suggests reweighting response tokens by their prediction error, which is available from the forward pass of Section~\ref{subsec:gatt_pipeline} at no extra cost. With $\omega_t := 1 - P(y_t \mid p, S, r_{1:t-1})$ (or the surprisal $-\log P(y_t \mid p, S, r_{1:t-1})$), one replaces the pooled response query of RCB by $\sum_{t \in \mathcal{T}_r} \omega_t \mathbf{q}_t^{(l,j)} / \sum_t \omega_t$, and the TCR profile entries by $\omega_t f_i(l,j,t)$. Since $\boldsymbol{\delta}_t$ aggregates the errors of all later tokens, $\omega_t$ is only a proxy for $\|\boldsymbol{\delta}_t\|$. With one additional backward pass, the exact alignments $\langle \mathbf{v}_c - \mathbf{o}_t, \boldsymbol{\delta}_t \rangle$ can be used instead, e.g., through the profile entries $\big( a_{t,c} \langle \mathbf{v}_c - \mathbf{o}_t, \boldsymbol{\delta}_t \rangle \big)^+$. We leave the empirical evaluation of these variants to future work.
+\end{remark}
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+% Experiments section for "Attribution for LLMs via Subspace Geometry".
+% Generated from the notebooks in
+%   //experimental/users/busarobi/attribution/gemma/paper/
+% (p1_responses_and_llh_reference, p2_eatt_gecko, p3_gatt_attention,
+%  p3b_gatt_ablation, p4_paper_results, p5_baselines); raw results in
+%   /cns/ob-d/home/multiverse-ai-crawl-prod/busarobi/gemma4_attribution/paper_v1/
+% Requires: \usepackage{booktabs}, \usepackage{graphicx}.
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+\input{experiments}
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+
+
+\bibliographystyle{alpha}
+\bibliography{sample}
+
+
+\input{app}
+
+
+\end{document}
